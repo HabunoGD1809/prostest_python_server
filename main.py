@@ -100,6 +100,9 @@ class Protesta(Base):
     creado_por = Column(UUID(as_uuid=True), ForeignKey('usuarios.id'))
     fecha_creacion = Column(Date, default=date.today())
     soft_delete = Column(Boolean, default=False)
+    
+    naturaleza = relationship("Naturaleza")
+    provincia = relationship("Provincia")
     cabecillas = relationship("Cabecilla", secondary="protestas_cabecillas")
 
 class ProtestaCabecilla(Base):
@@ -430,6 +433,8 @@ def obtener_protesta(protesta_id: uuid.UUID, usuario_actual: Usuario = Depends(o
         print(Fore.RED + f"Error al obtener protesta: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+
+
 @app.put("/protestas/{protesta_id}", response_model=ProtestaSalida)
 def actualizar_protesta(protesta_id: uuid.UUID, protesta: CrearProtesta, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
     try:
@@ -438,12 +443,19 @@ def actualizar_protesta(protesta_id: uuid.UUID, protesta: CrearProtesta, usuario
             print(Fore.YELLOW + f"Protesta no encontrada o sin permisos: {protesta_id}" + Style.RESET_ALL)
             raise HTTPException(status_code=404, detail="Protesta no encontrada o no tienes permiso para editarla")
         
-        for key, value in protesta.model_dump().items():
-            setattr(db_protesta, key, value)
+        # Actualizar campos simples
+        db_protesta.nombre = protesta.nombre
+        db_protesta.resumen = protesta.resumen
+        db_protesta.fecha_evento = protesta.fecha_evento
         
-        db_protesta.cabecillas.clear()
+        # Actualizar relaciones con objetos completos en lugar de IDs
+        db_protesta.naturaleza = db.query(Naturaleza).get(protesta.naturaleza_id)
+        db_protesta.provincia = db.query(Provincia).get(protesta.provincia_id)
+        
+        # Actualizar cabecillas
+        db_protesta.cabecillas = []
         for cabecilla_id in protesta.cabecillas:
-            db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id).first()
+            db_cabecilla = db.query(Cabecilla).get(cabecilla_id)
             if db_cabecilla:
                 db_protesta.cabecillas.append(db_cabecilla)
         
@@ -451,12 +463,11 @@ def actualizar_protesta(protesta_id: uuid.UUID, protesta: CrearProtesta, usuario
         db.refresh(db_protesta)
         print(Fore.GREEN + f"Protesta actualizada exitosamente: {db_protesta.nombre}" + Style.RESET_ALL)
         return db_protesta
-    except HTTPException as he:
-        raise he
     except Exception as e:
         db.rollback()
         print(Fore.RED + f"Error al actualizar protesta: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
 
 @app.delete("/protestas/{protesta_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_protesta(protesta_id: uuid.UUID, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
