@@ -9,11 +9,27 @@ from sqlalchemy.dialects.postgresql import UUID
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 from datetime import date, datetime, timedelta, timezone
+from colorama import init, Fore
+import psycopg2
 import uuid
 import bcrypt
 import jwt
 
-URL_BASE_DE_DATOS = "postgresql://habuno:90630898@localhost/protesta_db"
+init()
+
+usuario = "habuno"
+contraseña = "90630898"
+base_de_datos = "protestas_db"
+
+try:
+    conn = psycopg2.connect(f"postgresql://{usuario}:{contraseña}@localhost/{base_de_datos}")
+    print(Fore.BLUE + "Conexión exitosa a la base de datos" + Fore.RESET)
+
+    conn.close()
+except Exception as e:
+    print(Fore.RED + "Conexión exitosa a la base de datos" + Fore.RESET)
+
+URL_BASE_DE_DATOS = f"postgresql://{usuario}:{contraseña}@localhost/{base_de_datos}"
 motor = create_engine(URL_BASE_DE_DATOS)
 SesionLocal = sessionmaker(autocommit=False, autoflush=False, bind=motor)
 Base = declarative_base()
@@ -21,7 +37,7 @@ Base = declarative_base()
 app = FastAPI()
 
 # Configuración de autenticación
-CLAVE_SECRETA = "tu_clave_secreta"
+CLAVE_SECRETA = "b1T!2F3h6kJ8mN9pQ1rT3vW7yZ$0aE#4"
 ALGORITMO = "HS256"
 MINUTOS_EXPIRACION_TOKEN = 30
 
