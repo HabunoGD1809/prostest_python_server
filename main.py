@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, Column, String, Boolean, Date, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import UUID
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 from datetime import date, datetime, timedelta, timezone
 from colorama import init, Fore, Style
@@ -146,6 +146,13 @@ class NaturalezaSalida(BaseModel):
     class Config:
         from_attributes = True
 
+    @classmethod
+    def model_validate(cls, obj):
+        if isinstance(obj, dict):
+            if isinstance(obj.get("fecha_creacion"), datetime):
+                obj["fecha_creacion"] = obj["fecha_creacion"].date()
+        return super().model_validate(obj)
+
 class CrearCabecilla(BaseModel):
     foto: Optional[str]
     nombre: str
@@ -163,11 +170,20 @@ class CabecillaSalida(BaseModel):
     telefono: Optional[str]
     direccion: Optional[str]
     creado_por: uuid.UUID
-    fecha_creacion: date
+    fecha_creacion: date = Field(..., alias="fecha_creacion")
     soft_delete: bool
 
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.date().isoformat()
+        }
+
+    @classmethod
+    def model_validate(cls, obj):
+        if isinstance(obj.get("fecha_creacion"), datetime):
+            obj["fecha_creacion"] = obj["fecha_creacion"].date()
+        return super().model_validate(obj)
 
 class CrearProtesta(BaseModel):
     nombre: str
@@ -185,12 +201,21 @@ class ProtestaSalida(BaseModel):
     resumen: str
     fecha_evento: date
     creado_por: uuid.UUID
-    fecha_creacion: date
+    fecha_creacion: date = Field(..., alias="fecha_creacion")
     soft_delete: bool
     cabecillas: List[CabecillaSalida]
 
     class Config:
         from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.date().isoformat()
+        }
+
+    @classmethod
+    def model_validate(cls, obj):
+        if isinstance(obj.get("fecha_creacion"), datetime):
+            obj["fecha_creacion"] = obj["fecha_creacion"].date()
+        return super().model_validate(obj)
 
 class ProvinciaSalida(BaseModel):
     id: uuid.UUID
@@ -466,7 +491,7 @@ def obtener_naturalezas(db: Session = Depends(obtener_db)):
     try:
         naturalezas = db.query(Naturaleza).filter(Naturaleza.soft_delete == False).all()
         print(Fore.GREEN + f"Naturalezas obtenidas exitosamente. Total: {len(naturalezas)}" + Style.RESET_ALL)
-        return [NaturalezaSalida.model_validate(n) for n in naturalezas]
+        return [NaturalezaSalida.model_validate(n.__dict__) for n in naturalezas]
     except Exception as e:
         print(Fore.RED + f"Error al obtener naturalezas: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
