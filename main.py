@@ -343,6 +343,9 @@ def obtener_usuario_actual(usuario_actual: Usuario = Depends(obtener_usuario_act
 @app.post("/registro", response_model=UsuarioSalida)
 def registrar_usuario(usuario: CrearUsuario, db: Session = Depends(obtener_db)):
     try:
+        if usuario.password != usuario.repetir_password:
+            raise HTTPException(status_code=400, detail="Las contraseñas no coinciden")
+
         hash_password = obtener_hash_password(usuario.password)
         db_usuario = Usuario(
             foto=usuario.foto,
@@ -380,11 +383,6 @@ def registrar_usuario(usuario: CrearUsuario, db: Session = Depends(obtener_db)):
         db.rollback()
         print(Fore.RED + f"Error al registrar usuario: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
-
-@app.post("/registro", response_model=UsuarioSalida)
-def registrar_usuario(usuario: CrearUsuario, db: Session = Depends(obtener_db)):
-    if usuario.password != usuario.repetir_password:
-        raise HTTPException(status_code=400, detail="Las contraseñas no coinciden")
 
 @app.post("/token", response_model=Token)
 def login_para_token_acceso(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(obtener_db)):
@@ -568,7 +566,8 @@ def obtener_protestas(
     fecha_hasta: Optional[date] = None,
     provincia_id: Optional[uuid.UUID] = None,
     naturaleza_id: Optional[uuid.UUID] = None,
-    db: Session = Depends(obtener_db)
+    db: Session = Depends(obtener_db),
+    usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
     query = db.query(Protesta).filter(Protesta.soft_delete == False)
     
@@ -814,10 +813,33 @@ def eliminar_cabecilla(cabecilla_id: uuid.UUID, usuario_actual: Usuario = Depend
         print(Fore.RED + f"Error al eliminar cabecilla: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
     
+import os
+import shutil
+import imghdr
+from fastapi import UploadFile, File, HTTPException
+from sqlalchemy.orm import Session
+
 UPLOAD_DIRECTORY = "uploads"
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+ALLOWED_IMAGE_TYPES = ['jpeg', 'png', 'gif']
 
 if not os.path.exists(UPLOAD_DIRECTORY):
     os.makedirs(UPLOAD_DIRECTORY)
+
+def validate_image(file: UploadFile):
+    # Verificar el tamaño del archivo
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+    if size > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail=f"El archivo es demasiado grande. El tamaño máximo es de {MAX_IMAGE_SIZE // (1024 * 1024)} MB.")
+    
+    # Verificar el tipo de archivo
+    contents = file.file.read()
+    file.file.seek(0)
+    file_type = imghdr.what(None, h=contents)
+    if file_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Tipo de archivo no permitido. Solo se aceptan {', '.join(ALLOWED_IMAGE_TYPES)}.")
 
 def save_upload_file(upload_file: UploadFile, destination: str) -> str:
     try:
@@ -833,6 +855,7 @@ async def actualizar_foto_usuario(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db)
 ):
+    validate_image(foto)
     file_name = f"{usuario_actual.id}_{foto.filename}"
     file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
     save_upload_file(foto, file_path)
@@ -852,6 +875,7 @@ async def actualizar_foto_cabecilla(
     if not cabecilla:
         raise HTTPException(status_code=404, detail="Cabecilla no encontrado o no tienes permiso para editarlo")
     
+    validate_image(foto)
     file_name = f"cabecilla_{cabecilla_id}_{foto.filename}"
     file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
     save_upload_file(foto, file_path)
