@@ -13,19 +13,17 @@ import uuid
 import bcrypt
 import jwt
 
-# Configuración de la base de datos
-SQLALCHEMY_DATABASE_URL = "postgresql://user:password@localhost/dbname"
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+URL_BASE_DE_DATOS = "postgresql://habuno:90630898@localhost/protesta_db"
+motor = create_engine(URL_BASE_DE_DATOS)
+SesionLocal = sessionmaker(autocommit=False, autoflush=False, bind=motor)
 Base = declarative_base()
 
-# Configuración de la aplicación
 app = FastAPI()
 
 # Configuración de autenticación
-SECRET_KEY = "tu_clave_secreta"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+CLAVE_SECRETA = "tu_clave_secreta"
+ALGORITMO = "HS256"
+MINUTOS_EXPIRACION_TOKEN = 30
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -89,30 +87,45 @@ class ProtestaCabecilla(Base):
     cabecilla_id = Column(UUID(as_uuid=True), ForeignKey('cabecillas.id'), primary_key=True)
 
 # Modelos Pydantic para la API
-class UsuarioCreate(BaseModel):
+class CrearUsuario(BaseModel):
     foto: Optional[str]
     nombre: str
     apellidos: str
     email: EmailStr
     password: str
 
-class UsuarioOut(BaseModel):
+class UsuarioSalida(BaseModel):
     id: uuid.UUID
     foto: Optional[str]
     nombre: str
     apellidos: str
     email: EmailStr
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
+    class Config:
+        from_attributes = True
 
-class NaturalezaCreate(BaseModel):
+class Token(BaseModel):
+    token_acceso: str
+    tipo_token: str
+
+class CrearNaturaleza(BaseModel):
     nombre: str
     color: str
     icono: Optional[str]
 
-class CabecillaCreate(BaseModel):
+class NaturalezaSalida(BaseModel):
+    id: uuid.UUID
+    nombre: str
+    color: str
+    icono: Optional[str]
+    creado_por: uuid.UUID
+    fecha_creacion: date
+    soft_delete: bool
+
+    class Config:
+        from_attributes = True
+
+class CrearCabecilla(BaseModel):
     foto: Optional[str]
     nombre: str
     apellido: str
@@ -120,7 +133,22 @@ class CabecillaCreate(BaseModel):
     telefono: Optional[str]
     direccion: Optional[str]
 
-class ProtestaCreate(BaseModel):
+class CabecillaSalida(BaseModel):
+    id: uuid.UUID
+    foto: Optional[str]
+    nombre: str
+    apellido: str
+    cedula: str
+    telefono: Optional[str]
+    direccion: Optional[str]
+    creado_por: uuid.UUID
+    fecha_creacion: date
+    soft_delete: bool
+
+    class Config:
+        from_attributes = True
+
+class CrearProtesta(BaseModel):
     nombre: str
     naturaleza_id: uuid.UUID
     provincia_id: uuid.UUID
@@ -128,109 +156,130 @@ class ProtestaCreate(BaseModel):
     fecha_evento: date
     cabecillas: List[uuid.UUID]
 
+class ProtestaSalida(BaseModel):
+    id: uuid.UUID
+    nombre: str
+    naturaleza_id: uuid.UUID
+    provincia_id: uuid.UUID
+    resumen: str
+    fecha_evento: date
+    creado_por: uuid.UUID
+    fecha_creacion: date
+    soft_delete: bool
+    cabecillas: List[CabecillaSalida]
+
+    class Config:
+        from_attributes = True
+
+class ProvinciaSalida(BaseModel):
+    id: uuid.UUID
+    nombre: str
+    soft_delete: bool
+
+    class Config:
+        from_attributes = True
+
 # Funciones auxiliares
-def get_db():
-    db = SessionLocal()
+def obtener_db():
+    db = SesionLocal()
     try:
         yield db
     finally:
         db.close()
 
-def verify_password(plain_password, hashed_password):
-    return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+def verificar_password(password_plano, password_hash):
+    return bcrypt.checkpw(password_plano.encode('utf-8'), password_hash.encode('utf-8'))
 
-def get_password_hash(password):
+def obtener_hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+def crear_token_acceso(datos: dict, delta_expiracion: Optional[timedelta] = None):
+    a_codificar = datos.copy()
+    if delta_expiracion:
+        expira = datetime.now(timezone.utc) + delta_expiracion
     else:
-        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+        expira = datetime.now(timezone.utc) + timedelta(minutes=15)
+    a_codificar.update({"exp": expira})
+    token_jwt_codificado = jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
+    return token_jwt_codificado
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    credentials_exception = HTTPException(
+def obtener_usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(obtener_db)):
+    excepcion_credenciales = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail="No se pudieron validar las credenciales",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, CLAVE_SECRETA, algorithms=[ALGORITMO])
         email: str = payload.get("sub")
         if email is None:
-            raise credentials_exception
+            raise excepcion_credenciales
     except JWTError:
-        raise credentials_exception
-    user = db.query(Usuario).filter(Usuario.email == email).first()
-    if user is None:
-        raise credentials_exception
-    return user
+        raise excepcion_credenciales
+    usuario = db.query(Usuario).filter(Usuario.email == email).first()
+    if usuario is None:
+        raise excepcion_credenciales
+    return usuario
 
 # Rutas de la API
-# Continuación de main.py
-
-@app.post("/register", response_model=UsuarioOut)
-def register_user(user: UsuarioCreate, db: Session = Depends(get_db)):
-    db_user = db.query(Usuario).filter(Usuario.email == user.email).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    hashed_password = get_password_hash(user.password)
-    db_user = Usuario(
-        foto=user.foto,
-        nombre=user.nombre,
-        apellidos=user.apellidos,
-        email=user.email,
-        password=hashed_password
+@app.post("/registro", response_model=UsuarioSalida)
+def registrar_usuario(usuario: CrearUsuario, db: Session = Depends(obtener_db)):
+    db_usuario = db.query(Usuario).filter(Usuario.email == usuario.email).first()
+    if db_usuario:
+        raise HTTPException(status_code=400, detail="El email ya está registrado")
+    hash_password = obtener_hash_password(usuario.password)
+    db_usuario = Usuario(
+        foto=usuario.foto,
+        nombre=usuario.nombre,
+        apellidos=usuario.apellidos,
+        email=usuario.email,
+        password=hash_password
     )
-    db.add(db_user)
+    db.add(db_usuario)
     db.commit()
-    db.refresh(db_user)
-    return db_user
+    db.refresh(db_usuario)
+    return db_usuario
 
 @app.post("/token", response_model=Token)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(Usuario).filter(Usuario.email == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.password):
+def login_para_token_acceso(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(obtener_db)):
+    usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
+    if not usuario or not verificar_password(form_data.password, usuario.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            detail="Email o contraseña incorrectos",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.email}, expires_delta=access_token_expires
+    expiracion_token_acceso = timedelta(minutes=MINUTOS_EXPIRACION_TOKEN)
+    token_acceso = crear_token_acceso(
+        datos={"sub": usuario.email}, delta_expiracion=expiracion_token_acceso
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"token_acceso": token_acceso, "tipo_token": "bearer"}
 
-@app.post("/naturalezas", response_model=NaturalezaCreate)
-def create_naturaleza(naturaleza: NaturalezaCreate, current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_naturaleza = Naturaleza(**naturaleza.model_dump(), creado_por=current_user.id)
+@app.post("/naturalezas", response_model=NaturalezaSalida)
+def crear_naturaleza(naturaleza: CrearNaturaleza, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+    db_naturaleza = Naturaleza(**naturaleza.model_dump(), creado_por=usuario_actual.id)
     db.add(db_naturaleza)
     db.commit()
     db.refresh(db_naturaleza)
     return db_naturaleza
 
-@app.post("/cabecillas", response_model=CabecillaCreate)
-def create_cabecilla(cabecilla: CabecillaCreate, current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_cabecilla = Cabecilla(**cabecilla.model_dump(), creado_por=current_user.id)
+@app.post("/cabecillas", response_model=CabecillaSalida)
+def crear_cabecilla(cabecilla: CrearCabecilla, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+    db_cabecilla = Cabecilla(**cabecilla.model_dump(), creado_por=usuario_actual.id)
     db.add(db_cabecilla)
     db.commit()
     db.refresh(db_cabecilla)
     return db_cabecilla
 
-@app.post("/protestas", response_model=ProtestaCreate)
-def create_protesta(protesta: ProtestaCreate, current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+@app.post("/protestas", response_model=ProtestaSalida)
+def crear_protesta(protesta: CrearProtesta, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
     db_protesta = Protesta(
         nombre=protesta.nombre,
         naturaleza_id=protesta.naturaleza_id,
         provincia_id=protesta.provincia_id,
         resumen=protesta.resumen,
         fecha_evento=protesta.fecha_evento,
-        creado_por=current_user.id
+        creado_por=usuario_actual.id
     )
     db.add(db_protesta)
     db.commit()
@@ -244,25 +293,25 @@ def create_protesta(protesta: ProtestaCreate, current_user: Usuario = Depends(ge
     db.commit()
     return db_protesta
 
-@app.get("/protestas", response_model=List[ProtestaCreate])
-def get_protestas(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+@app.get("/protestas", response_model=List[ProtestaSalida])
+def obtener_protestas(usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
     protestas = db.query(Protesta).filter(Protesta.soft_delete == False).all()
     return protestas
 
-@app.get("/protestas/{protesta_id}", response_model=ProtestaCreate)
-def get_protesta(protesta_id: uuid.UUID, current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+@app.get("/protestas/{protesta_id}", response_model=ProtestaSalida)
+def obtener_protesta(protesta_id: uuid.UUID, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
     protesta = db.query(Protesta).filter(Protesta.id == protesta_id, Protesta.soft_delete == False).first()
     if not protesta:
-        raise HTTPException(status_code=404, detail="Protesta not found")
+        raise HTTPException(status_code=404, detail="Protesta no encontrada")
     return protesta
 
-@app.put("/protestas/{protesta_id}", response_model=ProtestaCreate)
-def update_protesta(protesta_id: uuid.UUID, protesta: ProtestaCreate, current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id, Protesta.creado_por == current_user.id).first()
+@app.put("/protestas/{protesta_id}", response_model=ProtestaSalida)
+def actualizar_protesta(protesta_id: uuid.UUID, protesta: CrearProtesta, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+    db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id, Protesta.creado_por == usuario_actual.id).first()
     if not db_protesta:
-        raise HTTPException(status_code=404, detail="Protesta not found or you don't have permission to edit")
+        raise HTTPException(status_code=404, detail="Protesta no encontrada o no tienes permiso para editarla")
     
-    for key, value in protesta.dict().items():
+    for key, value in protesta.model_dump().items():
         setattr(db_protesta, key, value)
     
     db_protesta.cabecillas.clear()
@@ -276,17 +325,85 @@ def update_protesta(protesta_id: uuid.UUID, protesta: ProtestaCreate, current_us
     return db_protesta
 
 @app.delete("/protestas/{protesta_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_protesta(protesta_id: uuid.UUID, current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id, Protesta.creado_por == current_user.id).first()
+def eliminar_protesta(protesta_id: uuid.UUID, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+    db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id, Protesta.creado_por == usuario_actual.id).first()
     if not db_protesta:
-        raise HTTPException(status_code=404, detail="Protesta not found or you don't have permission to delete")
+        raise HTTPException(status_code=404, detail="Protesta no encontrada o no tienes permiso para eliminarla")
     db_protesta.soft_delete = True
     db.commit()
-    return {"detail": "Protesta deleted successfully"}
+    return {"detail": "Protesta eliminada exitosamente"}
 
-@app.get("/provincias", response_model=List[Provincia])
-def get_provincias(db: Session = Depends(get_db)):
+@app.get("/provincias", response_model=List[ProvinciaSalida])
+def obtener_provincias(db: Session = Depends(obtener_db)):
     return db.query(Provincia).filter(Provincia.soft_delete == False).all()
+
+# Nuevas rutas para Naturalezas y Cabecillas
+
+@app.get("/naturalezas", response_model=List[NaturalezaSalida])
+def obtener_naturalezas(db: Session = Depends(obtener_db)):
+    return db.query(Naturaleza).filter(Naturaleza.soft_delete == False).all()
+
+@app.get("/naturalezas/{naturaleza_id}", response_model=NaturalezaSalida)
+def obtener_naturaleza(naturaleza_id: uuid.UUID, db: Session = Depends(obtener_db)):
+    naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id, Naturaleza.soft_delete == False).first()
+    if not naturaleza:
+        raise HTTPException(status_code=404, detail="Naturaleza no encontrada")
+    return naturaleza
+
+@app.put("/naturalezas/{naturaleza_id}", response_model=NaturalezaSalida)
+def actualizar_naturaleza(naturaleza_id: uuid.UUID, naturaleza: CrearNaturaleza, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+    db_naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id, Naturaleza.creado_por == usuario_actual.id).first()
+    if not db_naturaleza:
+        raise HTTPException(status_code=404, detail="Naturaleza no encontrada o no tienes permiso para editarla")
+    
+    for key, value in naturaleza.model_dump().items():
+        setattr(db_naturaleza, key, value)
+    
+    db.commit()
+    db.refresh(db_naturaleza)
+    return db_naturaleza
+
+@app.delete("/naturalezas/{naturaleza_id}", status_code=status.HTTP_204_NO_CONTENT)
+def eliminar_naturaleza(naturaleza_id: uuid.UUID, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+    db_naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id, Naturaleza.creado_por == usuario_actual.id).first()
+    if not db_naturaleza:
+        raise HTTPException(status_code=404, detail="Naturaleza no encontrada o no tienes permiso para eliminarla")
+    db_naturaleza.soft_delete = True
+    db.commit()
+    return {"detail": "Naturaleza eliminada exitosamente"}
+
+@app.get("/cabecillas", response_model=List[CabecillaSalida])
+def obtener_cabecillas(db: Session = Depends(obtener_db)):
+    return db.query(Cabecilla).filter(Cabecilla.soft_delete == False).all()
+
+@app.get("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
+def obtener_cabecilla(cabecilla_id: uuid.UUID, db: Session = Depends(obtener_db)):
+    cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id, Cabecilla.soft_delete == False).first()
+    if not cabecilla:
+        raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
+    return cabecilla
+
+@app.put("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
+def actualizar_cabecilla(cabecilla_id: uuid.UUID, cabecilla: CrearCabecilla, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+    db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario_actual.id).first()
+    if not db_cabecilla:
+        raise HTTPException(status_code=404, detail="Cabecilla no encontrado o no tienes permiso para editarlo")
+    
+    for key, value in cabecilla.model_dump().items():
+        setattr(db_cabecilla, key, value)
+    
+    db.commit()
+    db.refresh(db_cabecilla)
+    return db_cabecilla
+
+@app.delete("/cabecillas/{cabecilla_id}", status_code=status.HTTP_204_NO_CONTENT)
+def eliminar_cabecilla(cabecilla_id: uuid.UUID, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+    db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario_actual.id).first()
+    if not db_cabecilla:
+        raise HTTPException(status_code=404, detail="Cabecilla no encontrado o no tienes permiso para eliminarlo")
+    db_cabecilla.soft_delete = True
+    db.commit()
+    return {"detail": "Cabecilla eliminado exitosamente"}
 
 if __name__ == "__main__":
     import uvicorn
