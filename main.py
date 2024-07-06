@@ -26,6 +26,7 @@ import shutil
 import imghdr
 from fastapi import UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
+from fastapi.middleware.cors import CORSMiddleware
 
 init(autoreset=True)
 
@@ -35,7 +36,7 @@ base_de_datos = "protestas_db"
 
 try:
     conn = psycopg2.connect(f"postgresql://{usuario}:{contraseña}@localhost/{base_de_datos}")
-    print(Fore.GREEN + "Conexión exitosa a la base de datos" + Style.RESET_ALL)
+    print(Fore.BLUE + "Conexión exitosa a la base de datos" + Style.RESET_ALL)
     conn.close()
 except Exception as e:
     print(Fore.RED + f"Error al conectar a la base de datos: {str(e)}" + Style.RESET_ALL)
@@ -47,6 +48,15 @@ SesionLocal = sessionmaker(autocommit=False, autoflush=False, bind=motor)
 Base = declarative_base()
 
 app = FastAPI()
+
+# Configuracion CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5174"], 
+    allow_credentials=True,
+    allow_methods=["*"],  
+    allow_headers=["*"], 
+)
 
 # Configuración de autenticación
 CLAVE_SECRETA = "b1T!2F3h6kJ8mN9pQ1rT3vW7yZ$0aE#4"
@@ -914,7 +924,7 @@ def signal_handler(signum, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     
-    config = uvicorn.Config(app, host="0.0.0.0", port=8000)
+    config = uvicorn.Config(app, host="0.0.0.0", port=9000)
     server = uvicorn.Server(config)
     
     try:
