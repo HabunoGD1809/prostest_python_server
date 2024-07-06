@@ -21,6 +21,11 @@ import uuid
 import bcrypt
 import sys
 import uvicorn
+import os
+import shutil
+import imghdr
+from fastapi import UploadFile, File, HTTPException
+from sqlalchemy.orm import Session
 
 init(autoreset=True)
 
@@ -812,12 +817,6 @@ def eliminar_cabecilla(cabecilla_id: uuid.UUID, usuario_actual: Usuario = Depend
         db.rollback()
         print(Fore.RED + f"Error al eliminar cabecilla: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
-    
-import os
-import shutil
-import imghdr
-from fastapi import UploadFile, File, HTTPException
-from sqlalchemy.orm import Session
 
 UPLOAD_DIRECTORY = "uploads"
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
