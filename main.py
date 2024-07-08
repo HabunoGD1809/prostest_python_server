@@ -2,7 +2,7 @@ import asyncio
 import os
 import shutil
 from signal import signal
-from fastapi import FastAPI, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import FastAPI, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -52,7 +52,7 @@ app = FastAPI()
 # Configuracion CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5174"], 
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],  
     allow_headers=["*"], 
@@ -356,43 +356,55 @@ def obtener_usuario_actual(usuario_actual: Usuario = Depends(obtener_usuario_act
     return usuario_actual
 
 @app.post("/registro", response_model=UsuarioSalida)
-def registrar_usuario(usuario: CrearUsuario, db: Session = Depends(obtener_db)):
-    try:
-        if usuario.password != usuario.repetir_password:
-            raise HTTPException(status_code=400, detail="Las contraseñas no coinciden")
+async def registrar_usuario(
+    nombre: str = Form(...),
+    apellidos: str = Form(...),
+    email: EmailStr = Form(...),
+    password: str = Form(...),
+    repetir_password: str = Form(...),
+    foto: UploadFile = File(None),
+    db: Session = Depends(obtener_db)
+):
+    if password != repetir_password:
+        raise HTTPException(status_code=400, detail="Las contraseñas no coinciden")
 
-        hash_password = obtener_hash_password(usuario.password)
+    try:
+        hash_password = obtener_hash_password(password)
+        
+        # Guardar la foto si se proporciona
+        foto_path = None
+        if foto:
+            validate_image(foto)
+            file_name = f"usuario_{uuid.uuid4()}_{foto.filename}"
+            file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
+            save_upload_file(foto, file_path)
+            foto_path = file_path
+
         db_usuario = Usuario(
-            foto=usuario.foto,
-            nombre=usuario.nombre,
-            apellidos=usuario.apellidos,
-            email=usuario.email,
+            foto=foto_path,
+            nombre=nombre,
+            apellidos=apellidos,
+            email=email,
             password=hash_password
         )
         db.add(db_usuario)
         db.commit()
         db.refresh(db_usuario)
-        print(Fore.GREEN + f"Usuario registrado exitosamente: {usuario.email}" + Style.RESET_ALL)
+        print(Fore.GREEN + f"Usuario registrado exitosamente: {email}" + Style.RESET_ALL)
         return db_usuario
     except IntegrityError as e:
         db.rollback()
         if isinstance(e.orig, psycopg2.errors.UniqueViolation):
             if "usuarios_email_key" in str(e.orig):
-                print(Fore.YELLOW + f"Intento de registrar usuario con email duplicado: {usuario.email}" + Style.RESET_ALL)
+                print(Fore.YELLOW + f"Intento de registrar usuario con email duplicado: {email}" + Style.RESET_ALL)
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Ya existe un usuario con el email '{usuario.email}'"
+                    detail=f"Ya existe un usuario con el email '{email}'"
                 )
         print(Fore.RED + f"Error de integridad al registrar usuario: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(
             status_code=400,
             detail="Error al registrar el usuario. Por favor, intente de nuevo."
-        )
-    except ValueError as ve:
-        print(Fore.YELLOW + f"Error de validación al registrar usuario: {str(ve)}" + Style.RESET_ALL)
-        raise HTTPException(
-            status_code=400,
-            detail=str(ve)
         )
     except Exception as e:
         db.rollback()
