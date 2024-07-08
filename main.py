@@ -27,6 +27,8 @@ import imghdr
 from fastapi import UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import joinedload
+
 
 init(autoreset=True)
 
@@ -242,8 +244,9 @@ class ProtestaSalida(BaseModel):
 
     @classmethod
     def model_validate(cls, obj):
-        if isinstance(obj.get("fecha_creacion"), datetime):
-            obj["fecha_creacion"] = obj["fecha_creacion"].date()
+        if isinstance(obj, dict):
+            if isinstance(obj.get("fecha_creacion"), datetime):
+                obj["fecha_creacion"] = obj["fecha_creacion"].date()
         return super().model_validate(obj)
 
 class ProvinciaSalida(BaseModel):
@@ -621,12 +624,16 @@ def obtener_protestas(
 @app.get("/protestas", response_model=List[ProtestaSalida])
 def obtener_protestas(usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
     try:
-        protestas = db.query(Protesta).filter(Protesta.soft_delete == False).all()
+        protestas = db.query(Protesta).filter(Protesta.soft_delete == False)\
+            .options(joinedload(Protesta.cabecillas))\
+            .all()
+        
         print(Fore.GREEN + f"Protestas obtenidas exitosamente. Total: {len(protestas)}" + Style.RESET_ALL)
-        return protestas
+        
+        return [ProtestaSalida.model_validate(protesta.__dict__) for protesta in protestas]
     except Exception as e:
         print(Fore.RED + f"Error al obtener protestas: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/protestas/{protesta_id}", response_model=ProtestaSalida)
 def obtener_protesta(protesta_id: uuid.UUID, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
