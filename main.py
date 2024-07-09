@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, Column, String, Boolean, Date, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import UUID
-from pydantic import BaseModel, EmailStr, Field, field_validator, validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import List, Optional
 from datetime import date, datetime, timedelta, timezone
 from colorama import init, Fore, Style
@@ -588,7 +588,7 @@ def crear_protesta(protesta: CrearProtesta, usuario_actual: Usuario = Depends(ob
         raise HTTPException(status_code=500, detail="Error interno del servidor")
     
 
-@app.get("/protestas", response_model=dict)
+@app.get("/protestas", response_model=List[ProtestaSalida])
 def obtener_protestas(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
@@ -611,29 +611,9 @@ def obtener_protestas(
         query = query.filter(Protesta.naturaleza_id == naturaleza_id)
     
     total = query.count()
-    protestas = query.offset((page - 1) * page_size).limit(page_size).all()
+    protestas = query.options(joinedload(Protesta.cabecillas)).offset((page - 1) * page_size).limit(page_size).all()
     
-    return {
-        "items": protestas,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "pages": (total + page_size - 1) // page_size
-    }
-
-@app.get("/protestas", response_model=List[ProtestaSalida])
-def obtener_protestas(usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
-    try:
-        protestas = db.query(Protesta).filter(Protesta.soft_delete == False)\
-            .options(joinedload(Protesta.cabecillas))\
-            .all()
-        
-        print(Fore.GREEN + f"Protestas obtenidas exitosamente. Total: {len(protestas)}" + Style.RESET_ALL)
-        
-        return [ProtestaSalida.model_validate(protesta.__dict__) for protesta in protestas]
-    except Exception as e:
-        print(Fore.RED + f"Error al obtener protestas: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+    return protestas
 
 @app.get("/protestas/{protesta_id}", response_model=ProtestaSalida)
 def obtener_protesta(protesta_id: uuid.UUID, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
