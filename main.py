@@ -171,7 +171,7 @@ class NaturalezaSalida(BaseModel):
     color: str
     icono: Optional[str]
     creado_por: uuid.UUID
-    fecha_creacion: date
+    fecha_creacion: datetime
     soft_delete: bool
 
     class Config:
@@ -232,7 +232,7 @@ class ProtestaSalida(BaseModel):
     resumen: str
     fecha_evento: date
     creado_por: uuid.UUID
-    fecha_creacion: date = Field(..., alias="fecha_creacion")
+    fecha_creacion: datetime = Field(..., alias="fecha_creacion")
     soft_delete: bool
     cabecillas: List[CabecillaSalida]
 
