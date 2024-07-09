@@ -372,8 +372,7 @@ async def registrar_usuario(
         raise HTTPException(status_code=400, detail="Las contraseñas no coinciden")
 
     try:
-        hash_password = obtener_hash_password(password)
-        
+        hash_password = obtener_hash_password(password) 
         # Guardar la foto si se proporciona
         foto_path = None
         if foto:
@@ -597,7 +596,7 @@ def obtener_protestas(
     provincia_id: Optional[uuid.UUID] = None,
     naturaleza_id: Optional[uuid.UUID] = None,
     db: Session = Depends(obtener_db),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    # usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
     query = db.query(Protesta).filter(Protesta.soft_delete == False)
     
@@ -610,9 +609,9 @@ def obtener_protestas(
     if naturaleza_id:
         query = query.filter(Protesta.naturaleza_id == naturaleza_id)
     
-    total = query.count()
+    # total = query.count()
+    # print(total, usuario_actual)
     protestas = query.options(joinedload(Protesta.cabecillas)).offset((page - 1) * page_size).limit(page_size).all()
-    
     return protestas
 
 @app.get("/protestas/{protesta_id}", response_model=ProtestaSalida)
@@ -892,6 +891,7 @@ async def actualizar_foto_cabecilla(
     db.commit()
     return cabecilla
 
+# Manejadores de excepciones (Exception Handlers)
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     print(Fore.YELLOW + f"HTTPException: {exc.detail}" + Style.RESET_ALL)
@@ -908,6 +908,7 @@ async def general_exception_handler(request, exc):
         content={"detail": "Ha ocurrido un error interno"}
     )
 
+# Eventos del ciclo de vida de la aplicación:
 @app.on_event("startup")
 async def startup_event():
     print(Fore.GREEN + "Servidor iniciado exitosamente." + Style.RESET_ALL)
@@ -920,6 +921,7 @@ def signal_handler(signum, frame):
     print(Fore.YELLOW + "\nDetención solicitada. Cerrando el servidor..." + Style.RESET_ALL)
     asyncio.get_event_loop().stop()
 
+# Punto de entrada de la aplicacion
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     
