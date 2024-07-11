@@ -353,6 +353,14 @@ def crear_tokens(datos: dict):
     token_actualizacion = crear_token(datos, timedelta(days=DIAS_EXPIRACION_TOKEN_ACTUALIZACION))
     return token_acceso, token_actualizacion
 
+
+UPLOAD_DIRECTORY = "uploads"
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+ALLOWED_IMAGE_TYPES = ['jpeg', 'png', 'gif']
+
+if not os.path.exists(UPLOAD_DIRECTORY):
+    os.makedirs(UPLOAD_DIRECTORY)
+    
 # Rutas de la API
 @app.get("/usuarios/me", response_model=UsuarioSalida)
 def obtener_usuario_actual(usuario_actual: Usuario = Depends(obtener_usuario_actual)):
@@ -479,25 +487,58 @@ def crear_naturaleza(naturaleza: CrearNaturaleza, usuario_actual: Usuario = Depe
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.post("/cabecillas", response_model=CabecillaSalida)
-def crear_cabecilla(cabecilla: CrearCabecilla, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
+async def crear_cabecilla(
+    nombre: str = Form(...),
+    apellido: str = Form(...),
+    cedula: str = Form(...),
+    telefono: str = Form(None),
+    direccion: str = Form(None),
+    foto: UploadFile = File(None),
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db)
+):
     try:
-        db_cabecilla = Cabecilla(**cabecilla.model_dump(), creado_por=usuario_actual.id)
+        # Crear el objeto Cabecilla sin la foto primero
+        cabecilla_data = {
+            "nombre": nombre,
+            "apellido": apellido,
+            "cedula": cedula,
+            "telefono": telefono,
+            "direccion": direccion,
+            "creado_por": usuario_actual.id
+        }
+        db_cabecilla = Cabecilla(**cabecilla_data)
         db.add(db_cabecilla)
+        db.flush()  # Para obtener el ID generado
+
+        # Manejar la subida de la foto si se proporciona
+        if foto:
+            file_extension = os.path.splitext(foto.filename)[1]
+            file_name = f"cabecilla_{db_cabecilla.id}{file_extension}"
+            file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
+            
+            with open(file_path, "wb") as buffer:
+                content = await foto.read()
+                buffer.write(content)
+            
+            db_cabecilla.foto = file_path
+
         db.commit()
         db.refresh(db_cabecilla)
-        print(Fore.GREEN + f"Cabecilla creado exitosamente: {cabecilla.nombre} {cabecilla.apellido}" + Style.RESET_ALL)
+        print(Fore.GREEN + f"Cabecilla creado exitosamente: {nombre} {apellido}" + Style.RESET_ALL)
         return db_cabecilla
+
     except IntegrityError as e:
         db.rollback()
         if isinstance(e.orig, psycopg2.errors.UniqueViolation):
             if "cabecillas_cedula_key" in str(e.orig):
-                print(Fore.YELLOW + f"Intento de crear cabecilla con cédula duplicada: {cabecilla.cedula}" + Style.RESET_ALL)
+                print(Fore.YELLOW + f"Intento de crear cabecilla con cédula duplicada: {cedula}" + Style.RESET_ALL)
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Ya existe un cabecilla con la cédula '{cabecilla.cedula}'"
+                    detail=f"Ya existe un cabecilla con la cédula '{cedula}'"
                 )
         print(Fore.RED + f"Error de integridad al crear cabecilla: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(
+        raise HTTPException(    
             status_code=400,
             detail="Error al crear el cabecilla. Por favor, intente de nuevo."
         )
@@ -826,12 +867,6 @@ def eliminar_cabecilla(cabecilla_id: uuid.UUID, usuario_actual: Usuario = Depend
         print(Fore.RED + f"Error al eliminar cabecilla: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-UPLOAD_DIRECTORY = "uploads"
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
-ALLOWED_IMAGE_TYPES = ['jpeg', 'png', 'gif']
-
-if not os.path.exists(UPLOAD_DIRECTORY):
-    os.makedirs(UPLOAD_DIRECTORY)
 
 def validate_image(file: UploadFile):
     # Verificar el tamaño del archivo
