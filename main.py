@@ -12,7 +12,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from typing import List, Optional
+from typing import Generic, List, Optional, TypeVar
 from datetime import date, datetime, timedelta, timezone
 from colorama import init, Fore, Style
 from sqlalchemy.exc import IntegrityError
@@ -282,6 +282,15 @@ class CrearProtestaCompleta(BaseModel):
 class ResumenPrincipal(BaseModel):
     total_protestas: int
     protestas_recientes: List[ProtestaSalida]
+
+T = TypeVar('T')
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    items: List[T]
+    total: int
+    page: int
+    page_size: int
+    pages: int    
 
 # Funciones auxiliares
 def obtener_db():
@@ -628,7 +637,7 @@ def crear_protesta(protesta: CrearProtesta, usuario_actual: Usuario = Depends(ob
         raise HTTPException(status_code=500, detail="Error interno del servidor")
     
 
-@app.get("/protestas", response_model=List[ProtestaSalida])
+@app.get("/protestas", response_model=PaginatedResponse[ProtestaSalida])
 def obtener_protestas(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
@@ -637,7 +646,6 @@ def obtener_protestas(
     provincia_id: Optional[uuid.UUID] = None,
     naturaleza_id: Optional[uuid.UUID] = None,
     db: Session = Depends(obtener_db),
-    # usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
     query = db.query(Protesta).filter(Protesta.soft_delete == False)
     
@@ -650,18 +658,33 @@ def obtener_protestas(
     if naturaleza_id:
         query = query.filter(Protesta.naturaleza_id == naturaleza_id)
     
-    # total = query.count()
-    # print(total, usuario_actual)
-    protestas = query.options(joinedload(Protesta.cabecillas)).offset((page - 1) * page_size).limit(page_size).all()
-    return protestas
+    total = query.count()
+    pages = (total + page_size - 1) // page_size
+
+    protestas = query.order_by(Protesta.fecha_evento.desc())
+    protestas = protestas.offset((page - 1) * page_size).limit(page_size).all()
+
+    return {
+        "items": protestas,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": pages
+    }
 
 @app.get("/protestas/{protesta_id}", response_model=ProtestaSalida)
 def obtener_protesta(protesta_id: uuid.UUID, usuario_actual: Usuario = Depends(obtener_usuario_actual), db: Session = Depends(obtener_db)):
     try:
-        protesta = db.query(Protesta).filter(Protesta.id == protesta_id, Protesta.soft_delete == False).first()
+        protesta = db.query(Protesta).options(
+            joinedload(Protesta.naturaleza),
+            joinedload(Protesta.provincia),
+            joinedload(Protesta.cabecillas)
+        ).filter(Protesta.id == protesta_id, Protesta.soft_delete == False).first()
+        
         if not protesta:
             print(Fore.YELLOW + f"Protesta no encontrada: {protesta_id}" + Style.RESET_ALL)
             raise HTTPException(status_code=404, detail="Protesta no encontrada")
+        
         print(Fore.GREEN + f"Protesta obtenida exitosamente: {protesta.nombre}" + Style.RESET_ALL)
         return protesta
     except HTTPException as he:
@@ -730,6 +753,16 @@ def obtener_provincias(db: Session = Depends(obtener_db)):
         return provincias
     except Exception as e:
         print(Fore.RED + f"Error al obtener provincias: {str(e)}" + Style.RESET_ALL)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+@app.get("/provincias/{provincia_id}", response_model=ProvinciaSalida)
+def obtener_provincia(provincia_id: uuid.UUID, db: Session = Depends(obtener_db)):
+    try:
+        provincia = db.query(Provincia).filter(Provincia.id == provincia_id, Provincia.soft_delete == False).first()
+        if not provincia:
+            raise HTTPException(status_code=404, detail="Provincia no encontrada")
+        return provincia
+    except Exception as e:
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.get("/naturalezas", response_model=List[NaturalezaSalida])
