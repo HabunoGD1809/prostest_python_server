@@ -1,0 +1,9 @@
+asyncio
+fastapi
+jose
+sqlalchemy
+psycopg2
+pydantic
+colorama
+bcrypt
+uvicorn
