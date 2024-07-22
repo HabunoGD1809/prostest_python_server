@@ -32,6 +32,8 @@ from sqlalchemy.types import TypeDecorator, CHAR
 from datetime import date, datetime, timezone
 from typing import List
 # from uuid import UUID
+from pydantic import BaseModel, Field
+
 
 init(autoreset=True)
 
@@ -225,30 +227,28 @@ class CrearNaturaleza(BaseModel):
 
 
 class NaturalezaSalida(BaseModel):
-    id: str = Field(..., description="ID de la naturaleza")
+    id: str
     nombre: str
     color: str
     icono: str
-    creado_por: str = Field(..., description="ID del usuario que creó la naturaleza")
+    creado_por: str
     fecha_creacion: date
     soft_delete: bool
 
     class Config:
         from_attributes = True
-        json_encoders = {
-            UUID: lambda v: str(v),
-            date: lambda v: v.isoformat(),
-        }
 
     @classmethod
-    def model_validate(cls, obj):
-        if isinstance(obj, dict):
-            obj = obj.copy()
-            if 'id' in obj and isinstance(obj['id'], UUID):
-                obj['id'] = str(obj['id'])
-            if 'creado_por' in obj and isinstance(obj['creado_por'], UUID):
-                obj['creado_por'] = str(obj['creado_por'])
-        return super().model_validate(obj)
+    def from_orm(cls, obj):
+        return cls(
+            id=str(obj.id),
+            nombre=obj.nombre,
+            color=obj.color,
+            icono=obj.icono,
+            creado_por=str(obj.creado_por),
+            fecha_creacion=obj.fecha_creacion.date() if isinstance(obj.fecha_creacion, datetime) else obj.fecha_creacion,
+            soft_delete=obj.soft_delete
+        )
 
 class CrearCabecilla(BaseModel):
     foto: Optional[str]
@@ -1043,19 +1043,7 @@ def obtener_provincia(provincia_id: uuid.UUID, db: Session = Depends(obtener_db)
 def obtener_naturalezas(db: Session = Depends(obtener_db)):
     try:
         naturalezas = db.query(Naturaleza).filter(Naturaleza.soft_delete == False).all()
-        naturalezas_salida = []
-        for naturaleza in naturalezas:
-            naturaleza_dict = {
-                "id": str(naturaleza.id),
-                "nombre": naturaleza.nombre,
-                "color": naturaleza.color,
-                "icono": naturaleza.icono,
-                "creado_por": str(naturaleza.creado_por),
-                "fecha_creacion": naturaleza.fecha_creacion.date() if isinstance(naturaleza.fecha_creacion, datetime) else naturaleza.fecha_creacion,
-                "soft_delete": naturaleza.soft_delete
-            }
-            naturalezas_salida.append(NaturalezaSalida(**naturaleza_dict))
-        
+        naturalezas_salida = [NaturalezaSalida.from_orm(n) for n in naturalezas]
         print(
             Fore.GREEN
             + f"Naturalezas obtenidas exitosamente. Total: {len(naturalezas_salida)}"
@@ -1086,7 +1074,7 @@ def obtener_naturaleza(naturaleza_id: uuid.UUID, db: Session = Depends(obtener_d
             + f"Naturaleza obtenida exitosamente: {naturaleza.nombre}"
             + Style.RESET_ALL
         )
-        return naturaleza
+        return NaturalezaSalida.from_orm(naturaleza)
     except HTTPException as he:
         raise he
     except Exception as e:
