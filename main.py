@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, Column, String, Boolean, Date, ForeignKey
+from sqlalchemy import DateTime, create_engine, Column, String, Boolean, Date, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -24,15 +24,18 @@ import uvicorn
 import os
 import shutil
 import imghdr
-from fastapi import UploadFile, File, HTTPException
+from fastapi import UploadFile, Depends, File, HTTPException
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import joinedload
 from sqlalchemy.types import TypeDecorator, CHAR
+from datetime import date, datetime, timezone
+from typing import List
+# from uuid import UUID
 
 init(autoreset=True)
 
-usuario = "habunito"
+usuario = "habuno"
 contraseña = "90630898"
 base_de_datos = "protestas_db"
 
@@ -119,6 +122,18 @@ class Usuario(Base):
     password = Column(String, nullable=False)
     fecha_creacion = Column(Date, default=date.today())
     soft_delete = Column(Boolean, default=False)
+    rol = Column(String, default="usuario", nullable=False)
+
+class UsuarioSalida(BaseModel):
+    id: uuid.UUID
+    foto: Optional[str]
+    nombre: str
+    apellidos: str
+    email: EmailStr
+    rol: str
+
+    class Config:
+        from_attributes = True
 
 class Provincia(Base):
     __tablename__ = "provincias"
@@ -128,12 +143,12 @@ class Provincia(Base):
 
 class Naturaleza(Base):
     __tablename__ = "naturalezas"
-    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     nombre = Column(String, unique=True, nullable=False)
     color = Column(String(7), nullable=False)
-    icono = Column(String)
-    creado_por = Column(GUID(), ForeignKey("usuarios.id"))
-    fecha_creacion = Column(Date, default=date.today())
+    icono = Column(String, nullable=False)
+    creado_por = Column(UUID(as_uuid=True), ForeignKey("usuarios.id"))
+    fecha_creacion = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     soft_delete = Column(Boolean, default=False)
 
 class Cabecilla(Base):
@@ -210,22 +225,30 @@ class CrearNaturaleza(BaseModel):
 
 
 class NaturalezaSalida(BaseModel):
-    id: uuid.UUID
+    id: str = Field(..., description="ID de la naturaleza")
     nombre: str
     color: str
-    icono: Optional[str]
-    creado_por: uuid.UUID
+    icono: str
+    creado_por: str = Field(..., description="ID del usuario que creó la naturaleza")
     fecha_creacion: date
     soft_delete: bool
 
     class Config:
         from_attributes = True
         json_encoders = {
-            uuid.UUID: lambda v: str(v),
+            UUID: lambda v: str(v),
             date: lambda v: v.isoformat(),
-            datetime: lambda v: v.isoformat(),
         }
 
+    @classmethod
+    def model_validate(cls, obj):
+        if isinstance(obj, dict):
+            obj = obj.copy()
+            if 'id' in obj and isinstance(obj['id'], UUID):
+                obj['id'] = str(obj['id'])
+            if 'creado_por' in obj and isinstance(obj['creado_por'], UUID):
+                obj['creado_por'] = str(obj['creado_por'])
+        return super().model_validate(obj)
 
 class CrearCabecilla(BaseModel):
     foto: Optional[str]
@@ -419,6 +442,13 @@ def crear_tokens(datos: dict):
     )
     return token_acceso, token_actualizacion
 
+def es_admin(usuario: Usuario) -> bool:
+    return usuario.rol == "admin"
+
+def verificar_admin(usuario: Usuario = Depends(obtener_usuario_actual)):
+    if not es_admin(usuario):
+        raise HTTPException(status_code=403, detail="Se requieren permisos de administrador")
+    return usuario
 
 UPLOAD_DIRECTORY = "uploads"
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
@@ -429,6 +459,44 @@ if not os.path.exists(UPLOAD_DIRECTORY):
 
 
 # Rutas de la API
+
+# admin 
+@app.put("/usuarios/{usuario_id}/rol", response_model=UsuarioSalida)
+def cambiar_rol_usuario(
+    usuario_id: uuid.UUID,
+    nuevo_rol: str = Query(..., regex="^(admin|usuario)$"),
+    admin_actual: Usuario = Depends(verificar_admin),
+    db: Session = Depends(obtener_db),
+):
+    try:
+        usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
+        if not usuario:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+        usuario.rol = nuevo_rol
+        db.commit()
+        db.refresh(usuario)
+        print(Fore.GREEN + f"Rol de usuario actualizado exitosamente: {usuario.email} - Nuevo rol: {nuevo_rol}" + Style.RESET_ALL)
+        return usuario
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        print(Fore.RED + f"Error al cambiar rol de usuario: {str(e)}" + Style.RESET_ALL)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+@app.get("/usuarios", response_model=List[UsuarioSalida])
+def listar_usuarios(
+    admin_actual: Usuario = Depends(verificar_admin),
+    db: Session = Depends(obtener_db),
+):
+    try:
+        usuarios = db.query(Usuario).filter(Usuario.soft_delete == False).all()
+        return usuarios
+    except Exception as e:
+        print(Fore.RED + f"Error al listar usuarios: {str(e)}" + Style.RESET_ALL)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+    
 @app.get("/usuarios/me", response_model=UsuarioSalida)
 def obtener_usuario_actual(usuario_actual: Usuario = Depends(obtener_usuario_actual)):
     return usuario_actual
@@ -884,23 +952,13 @@ def actualizar_protesta(
     db: Session = Depends(obtener_db),
 ):
     try:
-        db_protesta = (
-            db.query(Protesta)
-            .filter(
-                Protesta.id == protesta_id, Protesta.creado_por == usuario_actual.id
-            )
-            .first()
-        )
+        db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id).first()
         if not db_protesta:
-            print(
-                Fore.YELLOW
-                + f"Protesta no encontrada o sin permisos: {protesta_id}"
-                + Style.RESET_ALL
-            )
-            raise HTTPException(
-                status_code=404,
-                detail="Protesta no encontrada o no tienes permiso para editarla",
-            )
+            raise HTTPException(status_code=404, detail="Protesta no encontrada")
+
+        # Verificar si el usuario es el creador de la protesta
+        if db_protesta.creado_por != usuario_actual.id:
+            raise HTTPException(status_code=403, detail="No tienes permiso para editar esta protesta")
 
         # Actualizar campos simples
         db_protesta.nombre = protesta.nombre
@@ -920,51 +978,28 @@ def actualizar_protesta(
 
         db.commit()
         db.refresh(db_protesta)
-        print(
-            Fore.GREEN
-            + f"Protesta actualizada exitosamente: {db_protesta.nombre}"
-            + Style.RESET_ALL
-        )
+        print(Fore.GREEN + f"Protesta actualizada exitosamente: {db_protesta.nombre}" + Style.RESET_ALL)
         return db_protesta
     except Exception as e:
         db.rollback()
         print(Fore.RED + f"Error al actualizar protesta: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(
-            status_code=500, detail=f"Error interno del servidor: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 
 @app.delete("/protestas/{protesta_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_protesta(
     protesta_id: uuid.UUID,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    admin_actual: Usuario = Depends(verificar_admin),  # Esto asegura que solo los admins pueden acceder
     db: Session = Depends(obtener_db),
 ):
     try:
-        db_protesta = (
-            db.query(Protesta)
-            .filter(
-                Protesta.id == protesta_id, Protesta.creado_por == usuario_actual.id
-            )
-            .first()
-        )
+        db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id).first()
         if not db_protesta:
-            print(
-                Fore.YELLOW
-                + f"Protesta no encontrada o sin permisos para eliminar: {protesta_id}"
-                + Style.RESET_ALL
-            )
-            raise HTTPException(
-                status_code=404,
-                detail="Protesta no encontrada o no tienes permiso para eliminarla",
-            )
+            raise HTTPException(status_code=404, detail="Protesta no encontrada")
+        
         db_protesta.soft_delete = True
         db.commit()
-        print(
-            Fore.GREEN
-            + f"Protesta eliminada exitosamente: {db_protesta.nombre}"
-            + Style.RESET_ALL
-        )
+        print(Fore.GREEN + f"Protesta eliminada exitosamente por admin: {db_protesta.nombre}" + Style.RESET_ALL)
         return {"detail": "Protesta eliminada exitosamente"}
     except HTTPException as he:
         raise he
@@ -1008,16 +1043,28 @@ def obtener_provincia(provincia_id: uuid.UUID, db: Session = Depends(obtener_db)
 def obtener_naturalezas(db: Session = Depends(obtener_db)):
     try:
         naturalezas = db.query(Naturaleza).filter(Naturaleza.soft_delete == False).all()
+        naturalezas_salida = []
+        for naturaleza in naturalezas:
+            naturaleza_dict = {
+                "id": str(naturaleza.id),
+                "nombre": naturaleza.nombre,
+                "color": naturaleza.color,
+                "icono": naturaleza.icono,
+                "creado_por": str(naturaleza.creado_por),
+                "fecha_creacion": naturaleza.fecha_creacion.date() if isinstance(naturaleza.fecha_creacion, datetime) else naturaleza.fecha_creacion,
+                "soft_delete": naturaleza.soft_delete
+            }
+            naturalezas_salida.append(NaturalezaSalida(**naturaleza_dict))
+        
         print(
             Fore.GREEN
-            + f"Naturalezas obtenidas exitosamente. Total: {len(naturalezas)}"
+            + f"Naturalezas obtenidas exitosamente. Total: {len(naturalezas_salida)}"
             + Style.RESET_ALL
         )
-        return [NaturalezaSalida.model_validate(n.__dict__) for n in naturalezas]
+        return naturalezas_salida
     except Exception as e:
         print(Fore.RED + f"Error al obtener naturalezas: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
-
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/naturalezas/{naturaleza_id}", response_model=NaturalezaSalida)
 def obtener_naturaleza(naturaleza_id: uuid.UUID, db: Session = Depends(obtener_db)):
