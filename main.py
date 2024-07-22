@@ -351,14 +351,14 @@ class ResumenPrincipal(BaseModel):
 
 T = TypeVar("T")
 
-
 class PaginatedResponse(BaseModel, Generic[T]):
     items: List[T]
     total: int
     page: int
     page_size: int
     pages: int
-
+    class Config:
+        from_attributes = True
 
 # Funciones auxiliares
 def obtener_db():
@@ -648,7 +648,7 @@ def crear_naturaleza(
             + f"Naturaleza creada exitosamente: {naturaleza.nombre}"
             + Style.RESET_ALL
         )
-        return db_naturaleza
+        return NaturalezaSalida.from_orm(db_naturaleza)
     except IntegrityError as e:
         db.rollback()
         if isinstance(e.orig, psycopg2.errors.UniqueViolation):
@@ -1039,17 +1039,37 @@ def obtener_provincia(provincia_id: uuid.UUID, db: Session = Depends(obtener_db)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 
-@app.get("/naturalezas", response_model=List[NaturalezaSalida])
-def obtener_naturalezas(db: Session = Depends(obtener_db)):
+@app.get("/naturalezas", response_model=PaginatedResponse[NaturalezaSalida])
+def obtener_naturalezas(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    nombre: Optional[str] = None,
+    db: Session = Depends(obtener_db)
+):
     try:
-        naturalezas = db.query(Naturaleza).filter(Naturaleza.soft_delete == False).all()
+        query = db.query(Naturaleza).filter(Naturaleza.soft_delete == False)
+        
+        if nombre:
+            query = query.filter(Naturaleza.nombre.ilike(f"%{nombre}%"))
+        
+        total = query.count()
+        naturalezas = query.offset((page - 1) * page_size).limit(page_size).all()
         naturalezas_salida = [NaturalezaSalida.from_orm(n) for n in naturalezas]
+        
+        result = {
+            "items": naturalezas_salida,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size
+        }
+        
         print(
             Fore.GREEN
-            + f"Naturalezas obtenidas exitosamente. Total: {len(naturalezas_salida)}"
+            + f"Naturalezas obtenidas exitosamente. Total: {total}, Página: {page}"
             + Style.RESET_ALL
         )
-        return naturalezas_salida
+        return result
     except Exception as e:
         print(Fore.RED + f"Error al obtener naturalezas: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
@@ -1119,7 +1139,7 @@ def actualizar_naturaleza(
             + f"Naturaleza actualizada exitosamente: {db_naturaleza.nombre}"
             + Style.RESET_ALL
         )
-        return db_naturaleza
+        return NaturalezaSalida.from_orm(db_naturaleza)
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -1169,16 +1189,42 @@ def eliminar_naturaleza(
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 
-@app.get("/cabecillas", response_model=List[CabecillaSalida])
-def obtener_cabecillas(db: Session = Depends(obtener_db)):
+@app.get("/cabecillas", response_model=PaginatedResponse[CabecillaSalida])
+def obtener_cabecillas(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    nombre: Optional[str] = None,
+    apellido: Optional[str] = None,
+    cedula: Optional[str] = None,
+    db: Session = Depends(obtener_db)
+):
     try:
-        cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).all()
+        query = db.query(Cabecilla).filter(Cabecilla.soft_delete == False)
+        
+        if nombre:
+            query = query.filter(Cabecilla.nombre.ilike(f"%{nombre}%"))
+        if apellido:
+            query = query.filter(Cabecilla.apellido.ilike(f"%{apellido}%"))
+        if cedula:
+            query = query.filter(Cabecilla.cedula.ilike(f"%{cedula}%"))
+        
+        total = query.count()
+        cabecillas = query.offset((page - 1) * page_size).limit(page_size).all()
+        
+        result = {
+            "items": cabecillas,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size
+        }
+        
         print(
             Fore.GREEN
-            + f"Cabecillas obtenidos exitosamente. Total: {len(cabecillas)}"
+            + f"Cabecillas obtenidos exitosamente. Total: {total}, Página: {page}"
             + Style.RESET_ALL
         )
-        return cabecillas
+        return result
     except Exception as e:
         print(Fore.RED + f"Error al obtener cabecillas: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
