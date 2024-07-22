@@ -2,16 +2,7 @@ import asyncio
 import os
 import shutil
 from signal import signal
-from fastapi import (
-    FastAPI,
-    Depends,
-    File,
-    Form,
-    HTTPException,
-    Query,
-    UploadFile,
-    status,
-)
+from fastapi import (FastAPI, Depends, File, Form, HTTPException, Query, UploadFile, status,)
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -117,7 +108,6 @@ class GUID(TypeDecorator):
                 value = uuid.UUID(value)
             return value
 
-
 # Modelos SQLAlchemy actualizados
 class Usuario(Base):
     __tablename__ = "usuarios"
@@ -130,13 +120,11 @@ class Usuario(Base):
     fecha_creacion = Column(Date, default=date.today())
     soft_delete = Column(Boolean, default=False)
 
-
 class Provincia(Base):
     __tablename__ = "provincias"
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     nombre = Column(String, unique=True, nullable=False)
     soft_delete = Column(Boolean, default=False)
-
 
 class Naturaleza(Base):
     __tablename__ = "naturalezas"
@@ -147,7 +135,6 @@ class Naturaleza(Base):
     creado_por = Column(GUID(), ForeignKey("usuarios.id"))
     fecha_creacion = Column(Date, default=date.today())
     soft_delete = Column(Boolean, default=False)
-
 
 class Cabecilla(Base):
     __tablename__ = "cabecillas"
@@ -161,7 +148,6 @@ class Cabecilla(Base):
     creado_por = Column(GUID(), ForeignKey("usuarios.id"))
     fecha_creacion = Column(Date, default=date.today())
     soft_delete = Column(Boolean, default=False)
-
 
 class Protesta(Base):
     __tablename__ = "protestas"
@@ -179,12 +165,10 @@ class Protesta(Base):
     provincia = relationship("Provincia")
     cabecillas = relationship("Cabecilla", secondary="protestas_cabecillas")
 
-
 class ProtestaCabecilla(Base):
     __tablename__ = "protestas_cabecillas"
     protesta_id = Column(GUID(), ForeignKey("protestas.id"), primary_key=True)
     cabecilla_id = Column(GUID(), ForeignKey("cabecillas.id"), primary_key=True)
-
 
 # Modelos Pydantic para la API (actualizados)
 class CrearUsuario(BaseModel):
@@ -250,6 +234,7 @@ class CrearCabecilla(BaseModel):
     cedula: str
     telefono: Optional[str]
     direccion: Optional[str]
+
 
 class CabecillaSalida(BaseModel):
     id: uuid.UUID
@@ -878,7 +863,9 @@ def obtener_protesta(protesta_id: str, db: Session = Depends(obtener_db)):
             "creado_por": protesta.creado_por,
             "fecha_creacion": protesta.fecha_creacion,
             "soft_delete": protesta.soft_delete,
-            "cabecillas": [CabecillaSalida.from_orm(c) for c in protesta.cabecillas],
+            "cabecillas": [
+                CabecillaSalida.model_validate(c) for c in protesta.cabecillas
+            ],
         }
 
         return ProtestaSalida(**protesta_dict)
