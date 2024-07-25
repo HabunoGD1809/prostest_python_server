@@ -2,7 +2,7 @@ import asyncio
 import os
 import shutil
 from signal import signal
-from fastapi import (FastAPI, Depends, File, Form, HTTPException, Query, UploadFile, status,)
+from fastapi import (FastAPI, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,)
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -31,9 +31,7 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.types import TypeDecorator, CHAR
 from datetime import date, datetime, timezone
 from typing import List
-# from uuid import UUID
 from pydantic import BaseModel, Field
-
 
 init(autoreset=True)
 
@@ -72,19 +70,13 @@ app.add_middleware(
 # Configuración de autenticación
 CLAVE_SECRETA = "b1T!2F3h6kJ8mN9pQ1rT3vW7yZ$0aE#4"
 ALGORITMO = "HS256"
-MINUTOS_EXPIRACION_TOKEN_ACCESO = 30
-DIAS_EXPIRACION_TOKEN_ACTUALIZACION = 7
+MINUTOS_EXPIRACION_TOKEN_ACCESO = 15
+MINUTOS_INACTIVIDAD_PERMITIDOS = 5
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-
 # Definición del tipo GUID personalizado
 class GUID(TypeDecorator):
-    """Platform-independent GUID type.
-    Uses PostgreSQL's UUID type, otherwise uses
-    CHAR(32), storing as stringified hex values.
-    """
-
     impl = CHAR
     cache_ok = True
 
@@ -113,7 +105,7 @@ class GUID(TypeDecorator):
                 value = uuid.UUID(value)
             return value
 
-# Modelos SQLAlchemy actualizados
+# Modelos SQLAlchemy
 class Usuario(Base):
     __tablename__ = "usuarios"
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
@@ -187,7 +179,7 @@ class ProtestaCabecilla(Base):
     protesta_id = Column(GUID(), ForeignKey("protestas.id"), primary_key=True)
     cabecilla_id = Column(GUID(), ForeignKey("cabecillas.id"), primary_key=True)
 
-# Modelos Pydantic para la API (actualizados)
+# Modelos Pydantic para la API
 class CrearUsuario(BaseModel):
     foto: Optional[str] = None
     nombre: str
@@ -202,29 +194,14 @@ class CrearUsuario(BaseModel):
             raise ValueError("Las contraseñas no coinciden")
         return v
 
-
-class UsuarioSalida(BaseModel):
-    id: uuid.UUID
-    foto: Optional[str]
-    nombre: str
-    apellidos: str
-    email: EmailStr
-
-    class Config:
-        from_attributes = True
-
-
 class Token(BaseModel):
     token_acceso: str
-    token_actualizacion: str
     tipo_token: str
-
 
 class CrearNaturaleza(BaseModel):
     nombre: str
     color: str
     icono: Optional[str]
-
 
 class NaturalezaSalida(BaseModel):
     id: str
@@ -258,7 +235,6 @@ class CrearCabecilla(BaseModel):
     telefono: Optional[str]
     direccion: Optional[str]
 
-
 class CabecillaSalida(BaseModel):
     id: uuid.UUID
     foto: Optional[str]
@@ -279,7 +255,6 @@ class CabecillaSalida(BaseModel):
             datetime: lambda v: v.isoformat(),
         }
 
-
 class CrearProtesta(BaseModel):
     nombre: str
     naturaleza_id: uuid.UUID
@@ -287,7 +262,6 @@ class CrearProtesta(BaseModel):
     resumen: str
     fecha_evento: date
     cabecillas: List[uuid.UUID]
-
 
 class ProtestaSalida(BaseModel):
     id: uuid.UUID
@@ -309,7 +283,6 @@ class ProtestaSalida(BaseModel):
             datetime: lambda v: v.isoformat(),
         }
 
-
 class ProvinciaSalida(BaseModel):
     id: uuid.UUID
     nombre: str
@@ -318,7 +291,6 @@ class ProvinciaSalida(BaseModel):
     class Config:
         from_attributes = True
 
-
 class NuevoCabecilla(BaseModel):
     nombre: str
     apellido: str
@@ -326,12 +298,10 @@ class NuevoCabecilla(BaseModel):
     telefono: Optional[str]
     direccion: Optional[str]
 
-
 class NuevaNaturaleza(BaseModel):
     nombre: str
     color: str
     icono: Optional[str]
-
 
 class CrearProtestaCompleta(BaseModel):
     nombre: str
@@ -343,11 +313,9 @@ class CrearProtestaCompleta(BaseModel):
     cabecillas: List[uuid.UUID]
     nuevos_cabecillas: List[NuevoCabecilla]
 
-
 class ResumenPrincipal(BaseModel):
     total_protestas: int
     protestas_recientes: List[ProtestaSalida]
-
 
 T = TypeVar("T")
 
@@ -368,48 +336,69 @@ def obtener_db():
     finally:
         db.close()
 
-
 def verificar_password(password_plano, password_hash):
     return bcrypt.checkpw(password_plano.encode("utf-8"), password_hash.encode("utf-8"))
 
-
 def obtener_hash_password(password):
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
 
 def crear_token_acceso(datos: dict, delta_expiracion: Optional[timedelta] = None):
     a_codificar = datos.copy()
     if delta_expiracion:
         expira = datetime.now(timezone.utc) + delta_expiracion
     else:
-        expira = datetime.now(timezone.utc) + timedelta(minutes=15)
-    a_codificar.update({"exp": expira})
+        expira = datetime.now(timezone.utc) + timedelta(minutes=MINUTOS_EXPIRACION_TOKEN_ACCESO)
+    a_codificar.update({"exp": expira, "ultima_actividad": datetime.now(timezone.utc).isoformat()})
     token_jwt_codificado = jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
     return token_jwt_codificado
 
-
-def obtener_usuario_actual(
-    token: str = Depends(oauth2_scheme), db: Session = Depends(obtener_db)
-):
+async def verificar_token_y_actividad(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, CLAVE_SECRETA, algorithms=[ALGORITMO])
         email: str = payload.get("sub")
+        ultima_actividad = datetime.fromisoformat(payload.get("ultima_actividad"))
         if email is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido"
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+        
+        tiempo_inactivo = datetime.now(timezone.utc) - ultima_actividad
+        if tiempo_inactivo > timedelta(minutes=MINUTOS_INACTIVIDAD_PERMITIDOS):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión expirada por inactividad")
+        
+        # Actualizar el token con la nueva última actividad
+        nuevo_token = crear_token_acceso({"sub": email})
+        return nuevo_token, email
     except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
 
+async def obtener_usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(obtener_db)):
+    nuevo_token, email = await verificar_token_y_actividad(token)
     usuario = db.query(Usuario).filter(Usuario.email == email).first()
     if usuario is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado"
-        )
-    return usuario
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
+    return usuario, nuevo_token
 
+# Middleware para actualizar el token en cada petición
+@app.middleware("http")
+async def actualizar_token_actividad(request: Request, call_next):
+    response = await call_next(request)
+    if "Authorization" in request.headers:
+        try:
+            token = request.headers["Authorization"].split()[1]
+            nuevo_token, _ = await verificar_token_y_actividad(token)
+            response.headers["New-Token"] = nuevo_token
+        except HTTPException:
+            # Si hay una excepción, no actualizamos el token
+            pass
+    return response
+
+def es_admin(usuario: Usuario) -> bool:
+    return usuario.rol == "admin"
+
+def verificar_admin(usuario: Usuario = Depends(obtener_usuario_actual)):
+    usuario, _ = usuario
+    if not es_admin(usuario):
+        raise HTTPException(status_code=403, detail="Se requieren permisos de administrador")
+    return usuario
 
 def paginar(
     query, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100)
@@ -424,32 +413,6 @@ def paginar(
         "pages": (total + page_size - 1) // page_size,
     }
 
-
-def crear_token(datos: dict, tiempo_expiracion: timedelta):
-    a_codificar = datos.copy()
-    expira = datetime.utcnow() + tiempo_expiracion
-    a_codificar.update({"exp": expira})
-    token_codificado = jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
-    return token_codificado
-
-
-def crear_tokens(datos: dict):
-    token_acceso = crear_token(
-        datos, timedelta(minutes=MINUTOS_EXPIRACION_TOKEN_ACCESO)
-    )
-    token_actualizacion = crear_token(
-        datos, timedelta(days=DIAS_EXPIRACION_TOKEN_ACTUALIZACION)
-    )
-    return token_acceso, token_actualizacion
-
-def es_admin(usuario: Usuario) -> bool:
-    return usuario.rol == "admin"
-
-def verificar_admin(usuario: Usuario = Depends(obtener_usuario_actual)):
-    if not es_admin(usuario):
-        raise HTTPException(status_code=403, detail="Se requieren permisos de administrador")
-    return usuario
-
 UPLOAD_DIRECTORY = "uploads"
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 ALLOWED_IMAGE_TYPES = ["jpeg", "png", "gif"]
@@ -457,10 +420,8 @@ ALLOWED_IMAGE_TYPES = ["jpeg", "png", "gif"]
 if not os.path.exists(UPLOAD_DIRECTORY):
     os.makedirs(UPLOAD_DIRECTORY)
 
-
 # Rutas de la API
 
-# admin 
 @app.put("/usuarios/{usuario_id}/rol", response_model=UsuarioSalida)
 def cambiar_rol_usuario(
     usuario_id: uuid.UUID,
@@ -498,9 +459,15 @@ def listar_usuarios(
         raise HTTPException(status_code=500, detail="Error interno del servidor")
     
 @app.get("/usuarios/me", response_model=UsuarioSalida)
-def obtener_usuario_actual(usuario_actual: Usuario = Depends(obtener_usuario_actual)):
-    return usuario_actual
+async def obtener_usuario_actual_ruta(usuario_y_token: tuple = Depends(obtener_usuario_actual)):
+    usuario, nuevo_token = usuario_y_token
+    return UsuarioSalida.from_orm(usuario)
 
+def verificar_autenticacion(usuario_y_token: tuple = Depends(obtener_usuario_actual)):
+    usuario, _ = usuario_y_token
+    if not usuario:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
+    return usuario
 
 @app.post("/registro", response_model=UsuarioSalida)
 async def registrar_usuario(
@@ -567,10 +534,10 @@ async def registrar_usuario(
         print(Fore.RED + f"Error al registrar usuario: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.post("/token", response_model=Token)
-def login_para_token_acceso(
-    form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(obtener_db)
+async def login_para_token_acceso(
+    form_data: OAuth2PasswordRequestForm = Depends(), 
+    db: Session = Depends(obtener_db)
 ):
     usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
     if not usuario or not verificar_password(form_data.password, usuario.password):
@@ -579,43 +546,30 @@ def login_para_token_acceso(
             detail="Email o contraseña incorrectos",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    token_acceso, token_actualizacion = crear_tokens({"sub": usuario.email})
+    token_acceso = crear_token_acceso({"sub": usuario.email})
     return {
         "token_acceso": token_acceso,
-        "token_actualizacion": token_actualizacion,
         "tipo_token": "bearer",
     }
 
-
 @app.post("/token/renovar", response_model=Token)
 def renovar_token(
-    token: str = Depends(oauth2_scheme), db: Session = Depends(obtener_db)
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db)
 ):
-    try:
-        payload = jwt.decode(token, CLAVE_SECRETA, algorithms=[ALGORITMO])
-        email: str = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=400, detail="Token inválido")
-        usuario = db.query(Usuario).filter(Usuario.email == email).first()
-        if usuario is None:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado")
-        nuevo_token_acceso, nuevo_token_actualizacion = crear_tokens(
-            {"sub": usuario.email}
-        )
-        return {
-            "token_acceso": nuevo_token_acceso,
-            "token_actualizacion": nuevo_token_actualizacion,
-            "tipo_token": "bearer",
-        }
-    except JWTError:
-        raise HTTPException(status_code=400, detail="Token inválido o expirado")
-
+    usuario, _ = usuario_actual
+    nuevo_token_acceso = crear_token_acceso({"sub": usuario.email})
+    return {
+        "token_acceso": nuevo_token_acceso,
+        "tipo_token": "bearer",
+    }
 
 @app.get("/pagina-principal", response_model=ResumenPrincipal)
 def obtener_resumen_principal(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     total_protestas = db.query(Protesta).filter(Protesta.soft_delete == False).count()
     protestas_recientes = (
         db.query(Protesta)
@@ -629,16 +583,16 @@ def obtener_resumen_principal(
         total_protestas=total_protestas, protestas_recientes=protestas_recientes
     )
 
-
 @app.post("/naturalezas", response_model=NaturalezaSalida)
 def crear_naturaleza(
     naturaleza: CrearNaturaleza,
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     try:
         db_naturaleza = Naturaleza(
-            **naturaleza.model_dump(), creado_por=usuario_actual.id
+            **naturaleza.model_dump(), creado_por=usuario.id
         )
         db.add(db_naturaleza)
         db.commit()
@@ -676,7 +630,6 @@ def crear_naturaleza(
         print(Fore.RED + f"Error al crear naturaleza: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.post("/cabecillas", response_model=CabecillaSalida)
 async def crear_cabecilla(
     nombre: str = Form(...),
@@ -688,6 +641,7 @@ async def crear_cabecilla(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     try:
         # Crear el objeto Cabecilla sin la foto primero
         cabecilla_data = {
@@ -696,7 +650,7 @@ async def crear_cabecilla(
             "cedula": cedula,
             "telefono": telefono,
             "direccion": direccion,
-            "creado_por": usuario_actual.id,
+            "creado_por": usuario.id,
         }
         db_cabecilla = Cabecilla(**cabecilla_data)
         db.add(db_cabecilla)
@@ -750,17 +704,17 @@ async def crear_cabecilla(
         print(Fore.RED + f"Error al crear cabecilla: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.post("/protestas/completa", response_model=ProtestaSalida)
 def crear_protesta_completa(
     protesta: CrearProtestaCompleta,
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     # Crear nueva naturaleza si se proporciona
     if protesta.nueva_naturaleza:
         nueva_naturaleza = Naturaleza(
-            **protesta.nueva_naturaleza.model_dump(), creado_por=usuario_actual.id
+            **protesta.nueva_naturaleza.model_dump(), creado_por=usuario.id
         )
         db.add(nueva_naturaleza)
         db.flush()
@@ -772,7 +726,7 @@ def crear_protesta_completa(
     nuevos_cabecillas_ids = []
     for nuevo_cabecilla in protesta.nuevos_cabecillas:
         db_cabecilla = Cabecilla(
-            **nuevo_cabecilla.model_dump(), creado_por=usuario_actual.id
+            **nuevo_cabecilla.model_dump(), creado_por=usuario.id
         )
         db.add(db_cabecilla)
         db.flush()
@@ -785,7 +739,7 @@ def crear_protesta_completa(
         provincia_id=protesta.provincia_id,
         resumen=protesta.resumen,
         fecha_evento=protesta.fecha_evento,
-        creado_por=usuario_actual.id,
+        creado_por=usuario.id,
     )
     db.add(db_protesta)
     db.flush()
@@ -798,13 +752,13 @@ def crear_protesta_completa(
     db.refresh(db_protesta)
     return db_protesta
 
-
 @app.post("/protestas", response_model=ProtestaSalida)
 def crear_protesta(
     protesta: CrearProtesta,
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     try:
         # Validar que la naturaleza y la provincia existen
         naturaleza = db.query(Naturaleza).get(protesta.naturaleza_id)
@@ -829,7 +783,7 @@ def crear_protesta(
             provincia_id=protesta.provincia_id,
             resumen=protesta.resumen,
             fecha_evento=protesta.fecha_evento,
-            creado_por=usuario_actual.id,
+            creado_por=usuario.id,
         )
         db.add(db_protesta)
         db.flush()
@@ -854,7 +808,6 @@ def crear_protesta(
             status_code=500, detail=f"Error interno del servidor: {str(e)}"
         )
 
-
 @app.get("/protestas", response_model=PaginatedResponse[ProtestaSalida])
 def obtener_protestas(
     page: int = Query(1, ge=1),
@@ -863,6 +816,7 @@ def obtener_protestas(
     fecha_hasta: Optional[date] = None,
     provincia_id: Optional[uuid.UUID] = None,
     naturaleza_id: Optional[uuid.UUID] = None,
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
     query = db.query(Protesta).filter(Protesta.soft_delete == False)
@@ -890,9 +844,12 @@ def obtener_protestas(
         "pages": pages,
     }
 
-
 @app.get("/protestas/{protesta_id}", response_model=ProtestaSalida)
-def obtener_protesta(protesta_id: str, db: Session = Depends(obtener_db)):
+def obtener_protesta(
+    protesta_id: str,
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db)
+):
     try:
         # Convertir el string a UUID
         protesta_uuid = uuid.UUID(protesta_id)
@@ -943,7 +900,6 @@ def obtener_protesta(protesta_id: str, db: Session = Depends(obtener_db)):
             status_code=500, detail=f"Error interno del servidor: {str(e)}"
         )
 
-
 @app.put("/protestas/{protesta_id}", response_model=ProtestaSalida)
 def actualizar_protesta(
     protesta_id: uuid.UUID,
@@ -951,13 +907,14 @@ def actualizar_protesta(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     try:
         db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id).first()
         if not db_protesta:
             raise HTTPException(status_code=404, detail="Protesta no encontrada")
 
         # Verificar si el usuario es el creador de la protesta
-        if db_protesta.creado_por != usuario_actual.id:
+        if db_protesta.creado_por != usuario.id:
             raise HTTPException(status_code=403, detail="No tienes permiso para editar esta protesta")
 
         # Actualizar campos simples
@@ -985,11 +942,10 @@ def actualizar_protesta(
         print(Fore.RED + f"Error al actualizar protesta: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
-
 @app.delete("/protestas/{protesta_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_protesta(
     protesta_id: uuid.UUID,
-    admin_actual: Usuario = Depends(verificar_admin),  # Esto asegura que solo los admins pueden acceder
+    admin_actual: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
     try:
@@ -1008,9 +964,11 @@ def eliminar_protesta(
         print(Fore.RED + f"Error al eliminar protesta: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.get("/provincias", response_model=List[ProvinciaSalida])
-def obtener_provincias(db: Session = Depends(obtener_db)):
+def obtener_provincias(
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db)
+):
     try:
         provincias = db.query(Provincia).filter(Provincia.soft_delete == False).all()
         print(
@@ -1023,9 +981,12 @@ def obtener_provincias(db: Session = Depends(obtener_db)):
         print(Fore.RED + f"Error al obtener provincias: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.get("/provincias/{provincia_id}", response_model=ProvinciaSalida)
-def obtener_provincia(provincia_id: uuid.UUID, db: Session = Depends(obtener_db)):
+def obtener_provincia(
+    provincia_id: uuid.UUID,
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db)
+):
     try:
         provincia = (
             db.query(Provincia)
@@ -1038,12 +999,12 @@ def obtener_provincia(provincia_id: uuid.UUID, db: Session = Depends(obtener_db)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.get("/naturalezas", response_model=PaginatedResponse[NaturalezaSalida])
 def obtener_naturalezas(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     nombre: Optional[str] = None,
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db)
 ):
     try:
@@ -1075,7 +1036,11 @@ def obtener_naturalezas(
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/naturalezas/{naturaleza_id}", response_model=NaturalezaSalida)
-def obtener_naturaleza(naturaleza_id: uuid.UUID, db: Session = Depends(obtener_db)):
+def obtener_naturaleza(
+    naturaleza_id: uuid.UUID,
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db)
+):
     try:
         naturaleza = (
             db.query(Naturaleza)
@@ -1101,7 +1066,6 @@ def obtener_naturaleza(naturaleza_id: uuid.UUID, db: Session = Depends(obtener_d
         print(Fore.RED + f"Error al obtener naturaleza: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.put("/naturalezas/{naturaleza_id}", response_model=NaturalezaSalida)
 def actualizar_naturaleza(
     naturaleza_id: uuid.UUID,
@@ -1109,12 +1073,13 @@ def actualizar_naturaleza(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     try:
         db_naturaleza = (
             db.query(Naturaleza)
             .filter(
                 Naturaleza.id == naturaleza_id,
-                Naturaleza.creado_por == usuario_actual.id,
+                Naturaleza.creado_por == usuario.id,
             )
             .first()
         )
@@ -1147,13 +1112,13 @@ def actualizar_naturaleza(
         print(Fore.RED + f"Error al actualizar naturaleza: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.delete("/naturalezas/{naturaleza_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_naturaleza(
     naturaleza_id: uuid.UUID,
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     try:
         db_naturaleza = (
             db.query(Naturaleza)
@@ -1196,6 +1161,7 @@ def obtener_cabecillas(
     nombre: Optional[str] = None,
     apellido: Optional[str] = None,
     cedula: Optional[str] = None,
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db)
 ):
     try:
@@ -1229,9 +1195,12 @@ def obtener_cabecillas(
         print(Fore.RED + f"Error al obtener cabecillas: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.get("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
-def obtener_cabecilla(cabecilla_id: uuid.UUID, db: Session = Depends(obtener_db)):
+def obtener_cabecilla(
+    cabecilla_id: uuid.UUID,
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db)
+):
     try:
         cabecilla = (
             db.query(Cabecilla)
@@ -1257,7 +1226,6 @@ def obtener_cabecilla(cabecilla_id: uuid.UUID, db: Session = Depends(obtener_db)
         print(Fore.RED + f"Error al obtener cabecilla: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.put("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
 def actualizar_cabecilla(
     cabecilla_id: uuid.UUID,
@@ -1265,11 +1233,12 @@ def actualizar_cabecilla(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     try:
         db_cabecilla = (
             db.query(Cabecilla)
             .filter(
-                Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario_actual.id
+                Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id
             )
             .first()
         )
@@ -1302,18 +1271,18 @@ def actualizar_cabecilla(
         print(Fore.RED + f"Error al actualizar cabecilla: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 @app.delete("/cabecillas/{cabecilla_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_cabecilla(
     cabecilla_id: uuid.UUID,
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     try:
         db_cabecilla = (
             db.query(Cabecilla)
             .filter(
-                Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario_actual.id
+                Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id
             )
             .first()
         )
@@ -1350,7 +1319,6 @@ def eliminar_cabecilla(
         print(Fore.RED + f"Error al eliminar cabecilla: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-
 def validate_image(file: UploadFile):
     # Verificar el tamaño del archivo
     file.file.seek(0, 2)
@@ -1372,7 +1340,6 @@ def validate_image(file: UploadFile):
             detail=f"Tipo de archivo no permitido. Solo se aceptan {', '.join(ALLOWED_IMAGE_TYPES)}.",
         )
 
-
 def save_upload_file(upload_file: UploadFile, destination: str) -> str:
     try:
         with open(destination, "wb") as buffer:
@@ -1381,22 +1348,21 @@ def save_upload_file(upload_file: UploadFile, destination: str) -> str:
         upload_file.file.close()
     return destination
 
-
 @app.post("/usuarios/foto", response_model=UsuarioSalida)
 async def actualizar_foto_usuario(
     foto: UploadFile = File(...),
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     validate_image(foto)
-    file_name = f"{usuario_actual.id}_{foto.filename}"
+    file_name = f"{usuario.id}_{foto.filename}"
     file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
     save_upload_file(foto, file_path)
 
-    usuario_actual.foto = file_path
+    usuario.foto = file_path
     db.commit()
-    return usuario_actual
-
+    return usuario
 
 @app.post("/cabecillas/{cabecilla_id}/foto", response_model=CabecillaSalida)
 async def actualizar_foto_cabecilla(
@@ -1405,9 +1371,10 @@ async def actualizar_foto_cabecilla(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    usuario, _ = usuario_actual
     cabecilla = (
         db.query(Cabecilla)
-        .filter(Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario_actual.id)
+        .filter(Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id)
         .first()
     )
     if not cabecilla:
@@ -1425,13 +1392,11 @@ async def actualizar_foto_cabecilla(
     db.commit()
     return cabecilla
 
-
 # Manejadores de excepciones (Exception Handlers)
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     print(Fore.YELLOW + f"HTTPException: {exc.detail}" + Style.RESET_ALL)
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc):
@@ -1440,17 +1405,14 @@ async def general_exception_handler(request, exc):
         status_code=500, content={"detail": "Ha ocurrido un error interno"}
     )
 
-
 # Eventos del ciclo de vida de la aplicación:
 @app.on_event("startup")
 async def startup_event():
     print(Fore.GREEN + "Servidor iniciado exitosamente." + Style.RESET_ALL)
 
-
 @app.on_event("shutdown")
 async def shutdown_event():
     print(Fore.YELLOW + "Servidor cerrándose..." + Style.RESET_ALL)
-
 
 def signal_handler(signum, frame):
     print(
@@ -1459,7 +1421,6 @@ def signal_handler(signum, frame):
         + Style.RESET_ALL
     )
     asyncio.get_event_loop().stop()
-
 
 # Punto de entrada de la aplicacion
 if __name__ == "__main__":
