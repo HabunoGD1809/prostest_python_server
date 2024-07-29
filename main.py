@@ -1,37 +1,31 @@
+# Librerías estándar
 import asyncio
 import os
 import shutil
+import sys
+import uuid
+import imghdr
 from signal import signal
-from fastapi import (FastAPI, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,)
+from datetime import date, datetime, timedelta, timezone
+from typing import Generic, List, Optional, TypeVar
+
+# Librerías de terceros
+from fastapi import (FastAPI, Depends, File, Form, HTTPException, Query, Request, UploadFile, status)
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
-from sqlalchemy.orm import Session
 from sqlalchemy import DateTime, create_engine, Column, String, Boolean, Date, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
 from sqlalchemy.dialects.postgresql import UUID
-from pydantic import BaseModel, EmailStr, Field, field_validator
-from typing import Generic, List, Optional, TypeVar
-from datetime import date, datetime, timedelta, timezone
-from colorama import init, Fore, Style
 from sqlalchemy.exc import IntegrityError
-import psycopg2
-import uuid
-import bcrypt
-import sys
-import uvicorn
-import os
-import shutil
-import imghdr
-from fastapi import UploadFile, Depends, File, HTTPException
-from sqlalchemy.orm import Session
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import joinedload
 from sqlalchemy.types import TypeDecorator, CHAR
-from datetime import date, datetime, timezone
-from typing import List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+import psycopg2
+import bcrypt
+import uvicorn
+from colorama import init, Fore, Style
 
 init(autoreset=True)
 
