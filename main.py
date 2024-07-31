@@ -8,6 +8,7 @@ import imghdr
 from signal import signal
 from datetime import date, datetime, timedelta, timezone
 from typing import Generic, List, Optional, TypeVar
+from contextlib import asynccontextmanager
 
 # Librerías de terceros
 from fastapi import (FastAPI, Depends, File, Form, HTTPException, Query, Request, UploadFile, status)
@@ -21,38 +22,67 @@ from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import TypeDecorator, CHAR
+from sqlalchemy.schema import CreateSchema
+from sqlalchemy.sql import text
 from pydantic import BaseModel, EmailStr, Field, field_validator
 import psycopg2
 import bcrypt
 import uvicorn
 from colorama import init, Fore, Style
+from dotenv import load_dotenv
+
+# Cargar variables de entorno
+load_dotenv()
 
 init(autoreset=True)
 
-usuario = "habuno"
-contraseña = "90630898"
-base_de_datos = "protestas_db"
+# Variables de configuración
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
 
+# Conexión a la base de datos utilizando psycopg2
 try:
     conn = psycopg2.connect(
-        f"postgresql://{usuario}:{contraseña}@localhost/{base_de_datos}"
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT
     )
     print(Fore.BLUE + "Conexión exitosa a la base de datos" + Style.RESET_ALL)
     conn.close()
 except Exception as e:
-    print(
-        Fore.RED + f"Error al conectar a la base de datos: {str(e)}" + Style.RESET_ALL
-    )
+    print(Fore.RED + f"Error al conectar a la base de datos: {str(e)}" + Style.RESET_ALL)
     sys.exit(1)
 
-URL_BASE_DE_DATOS = f"postgresql://{usuario}:{contraseña}@localhost/{base_de_datos}"
+# Configuración de SQLAlchemy
+URL_BASE_DE_DATOS = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?options=-c search_path=api"
 motor = create_engine(URL_BASE_DE_DATOS)
+
+# el schema 'api' existe y se está utilizando ??
+with motor.connect() as conn:
+    if not conn.dialect.has_schema(conn, 'api'):
+        conn.execute(CreateSchema('api'))
+    conn.execute(text('SET search_path TO api'))
+
 SesionLocal = sessionmaker(autocommit=False, autoflush=False, bind=motor)
 Base = declarative_base()
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Código de inicio
+    print(Fore.GREEN + "Servidor iniciado exitosamente." + Style.RESET_ALL)
+    yield
+    # Código de cierre
+    print(Fore.YELLOW + "Servidor cerrándose..." + Style.RESET_ALL)
 
-# Configuracion CORS
+# Modifica esta línea para incluir el lifespan
+app = FastAPI(lifespan=lifespan)
+
+# Configuracion CORS (mantén esto como estaba)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -62,10 +92,10 @@ app.add_middleware(
 )
 
 # Configuración de autenticación
-CLAVE_SECRETA = "b1T!2F3h6kJ8mN9pQ1rT3vW7yZ$0aE#4"
-ALGORITMO = "HS256"
-MINUTOS_EXPIRACION_TOKEN_ACCESO = 15
-MINUTOS_INACTIVIDAD_PERMITIDOS = 5
+CLAVE_SECRETA = os.getenv("API_SECRET_KEY")
+ALGORITMO = os.getenv("API_ALGORITHM")
+MINUTOS_EXPIRACION_TOKEN_ACCESO = int(os.getenv("API_ACCESS_TOKEN_EXPIRE_MINUTES"))
+MINUTOS_INACTIVIDAD_PERMITIDOS = int(os.getenv("API_INACTIVITY_MINUTES"))
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -102,6 +132,7 @@ class GUID(TypeDecorator):
 # Modelos SQLAlchemy
 class Usuario(Base):
     __tablename__ = "usuarios"
+    __table_args__ = {"schema": "api"}
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     foto = Column(String)
     nombre = Column(String, nullable=False)
@@ -125,22 +156,25 @@ class UsuarioSalida(BaseModel):
 
 class Provincia(Base):
     __tablename__ = "provincias"
+    __table_args__ = {"schema": "api"}
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     nombre = Column(String, unique=True, nullable=False)
     soft_delete = Column(Boolean, default=False)
 
 class Naturaleza(Base):
     __tablename__ = "naturalezas"
+    __table_args__ = {"schema": "api"}
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     nombre = Column(String, unique=True, nullable=False)
     color = Column(String(7), nullable=False)
     icono = Column(String, nullable=False)
-    creado_por = Column(UUID(as_uuid=True), ForeignKey("usuarios.id"))
+    creado_por = Column(UUID(as_uuid=True), ForeignKey("api.usuarios.id"))
     fecha_creacion = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     soft_delete = Column(Boolean, default=False)
 
 class Cabecilla(Base):
     __tablename__ = "cabecillas"
+    __table_args__ = {"schema": "api"}
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     foto = Column(String)
     nombre = Column(String, nullable=False)
@@ -148,30 +182,32 @@ class Cabecilla(Base):
     cedula = Column(String, unique=True, nullable=False)
     telefono = Column(String)
     direccion = Column(String)
-    creado_por = Column(GUID(), ForeignKey("usuarios.id"))
+    creado_por = Column(GUID(), ForeignKey("api.usuarios.id"))
     fecha_creacion = Column(Date, default=date.today())
     soft_delete = Column(Boolean, default=False)
 
 class Protesta(Base):
     __tablename__ = "protestas"
+    __table_args__ = {"schema": "api"}
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     nombre = Column(String, nullable=False)
-    naturaleza_id = Column(GUID(), ForeignKey("naturalezas.id"))
-    provincia_id = Column(GUID(), ForeignKey("provincias.id"))
+    naturaleza_id = Column(GUID(), ForeignKey("api.naturalezas.id"))
+    provincia_id = Column(GUID(), ForeignKey("api.provincias.id"))
     resumen = Column(String)
     fecha_evento = Column(Date, nullable=False)
-    creado_por = Column(GUID(), ForeignKey("usuarios.id"))
+    creado_por = Column(GUID(), ForeignKey("api.usuarios.id"))
     fecha_creacion = Column(Date, default=date.today())
     soft_delete = Column(Boolean, default=False)
 
     naturaleza = relationship("Naturaleza")
     provincia = relationship("Provincia")
-    cabecillas = relationship("Cabecilla", secondary="protestas_cabecillas")
+    cabecillas = relationship("Cabecilla", secondary="api.protestas_cabecillas")
 
 class ProtestaCabecilla(Base):
     __tablename__ = "protestas_cabecillas"
-    protesta_id = Column(GUID(), ForeignKey("protestas.id"), primary_key=True)
-    cabecilla_id = Column(GUID(), ForeignKey("cabecillas.id"), primary_key=True)
+    __table_args__ = {"schema": "api"}
+    protesta_id = Column(GUID(), ForeignKey("api.protestas.id"), primary_key=True)
+    cabecilla_id = Column(GUID(), ForeignKey("api.cabecillas.id"), primary_key=True)
 
 # Modelos Pydantic para la API
 class CrearUsuario(BaseModel):
@@ -407,15 +443,14 @@ def paginar(
         "pages": (total + page_size - 1) // page_size,
     }
 
-UPLOAD_DIRECTORY = "uploads"
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
-ALLOWED_IMAGE_TYPES = ["jpeg", "png", "gif"]
+UPLOAD_DIRECTORY = os.getenv("UPLOAD_DIRECTORY")
+MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE"))
+ALLOWED_IMAGE_TYPES = os.getenv("ALLOWED_IMAGE_TYPES").split(',')
 
 if not os.path.exists(UPLOAD_DIRECTORY):
     os.makedirs(UPLOAD_DIRECTORY)
 
 # Rutas de la API
-
 @app.put("/usuarios/{usuario_id}/rol", response_model=UsuarioSalida)
 def cambiar_rol_usuario(
     usuario_id: uuid.UUID,
@@ -1386,7 +1421,7 @@ async def actualizar_foto_cabecilla(
     db.commit()
     return cabecilla
 
-# Manejadores de excepciones (Exception Handlers)
+# Manejadores de excepciones
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     print(Fore.YELLOW + f"HTTPException: {exc.detail}" + Style.RESET_ALL)
@@ -1399,33 +1434,40 @@ async def general_exception_handler(request, exc):
         status_code=500, content={"detail": "Ha ocurrido un error interno"}
     )
 
-# Eventos del ciclo de vida de la aplicación:
-@app.on_event("startup")
-async def startup_event():
-    print(Fore.GREEN + "Servidor iniciado exitosamente." + Style.RESET_ALL)
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    print(Fore.YELLOW + "Servidor cerrándose..." + Style.RESET_ALL)
+# Variable global para controlar el ciclo del servidor
+server_should_exit = False
 
 def signal_handler(signum, frame):
+    global server_should_exit
     print(
         Fore.YELLOW
         + "\nDetención solicitada. Cerrando el servidor..."
         + Style.RESET_ALL
     )
-    asyncio.get_event_loop().stop()
+    server_should_exit = True
 
-# Punto de entrada de la aplicacion
+# Configuración del servidor
+config = uvicorn.Config(
+    app,
+    host=os.getenv("SERVER_HOST"),
+    port=int(os.getenv("SERVER_PORT"))
+)
+server = uvicorn.Server(config)
+
+# Punto de entrada 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=9000)
-    server = uvicorn.Server(config)
+    # Manejo señal de salida
+    async def run_server():
+        await server.serve()
+        while not server_should_exit:
+            await asyncio.sleep(1)
+        await server.shutdown()
 
     try:
         print(Fore.CYAN + "Iniciando servidor..." + Style.RESET_ALL)
-        server.run()
+        asyncio.run(run_server())
     except Exception as e:
         print(Fore.RED + f"Error al iniciar el servidor: {str(e)}" + Style.RESET_ALL)
     finally:
