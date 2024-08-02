@@ -15,7 +15,8 @@ from fastapi import (Body, FastAPI, Depends, File, Form, HTTPException, Query, R
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from jose import JWTError, jwt
+from jose import jwt, JWTError
+from fastapi import HTTPException, status
 from sqlalchemy import DateTime, create_engine, Column, String, Boolean, Date, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
@@ -79,10 +80,9 @@ async def lifespan(app: FastAPI):
     # Código de cierre
     print(Fore.YELLOW + "Servidor cerrándose..." + Style.RESET_ALL)
 
-# Modifica esta línea para incluir el lifespan
 app = FastAPI(lifespan=lifespan)
 
-# Configuracion CORS (mantén esto como estaba)
+# Configuracion CORS 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -591,11 +591,15 @@ async def renovar_token(
         
         usuario = db.query(Usuario).filter(Usuario.email == email).first()
         if usuario is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+        
+        # Verificar si el token ha expirado
+        exp = payload.get("exp")
+        if exp is None or datetime.now(timezone.utc).timestamp() > exp:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización expirado")
         
         nuevo_token_acceso = crear_token_acceso({"sub": email})
-        # No creamos un nuevo token de actualización cada vez, solo cuando está cerca de expirar
-        tiempo_expiracion = payload.get("exp") - datetime.now(timezone.utc).timestamp()
+        tiempo_expiracion = exp - datetime.now(timezone.utc).timestamp()
         if tiempo_expiracion < 3600:  # Si falta menos de una hora para que expire
             nuevo_token_actualizacion = crear_token_actualizacion({"sub": email})
         else:
@@ -608,6 +612,8 @@ async def renovar_token(
         }
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización inválido o expirado")
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/pagina-principal", response_model=ResumenPrincipal)
 def obtener_resumen_principal(
