@@ -11,7 +11,7 @@ from typing import Generic, List, Optional, TypeVar
 from contextlib import asynccontextmanager
 
 # Librerías de terceros
-from fastapi import (FastAPI, Depends, File, Form, HTTPException, Query, Request, UploadFile, status)
+from fastapi import (Body, FastAPI, Depends, File, Form, HTTPException, Query, Request, UploadFile, status)
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
@@ -143,17 +143,6 @@ class Usuario(Base):
     soft_delete = Column(Boolean, default=False)
     rol = Column(String, default="usuario", nullable=False)
 
-class UsuarioSalida(BaseModel):
-    id: uuid.UUID
-    foto: Optional[str]
-    nombre: str
-    apellidos: str
-    email: EmailStr
-    rol: str
-
-    class Config:
-        from_attributes = True
-
 class Provincia(Base):
     __tablename__ = "provincias"
     __table_args__ = {"schema": "api"}
@@ -210,6 +199,16 @@ class ProtestaCabecilla(Base):
     cabecilla_id = Column(GUID(), ForeignKey("api.cabecillas.id"), primary_key=True)
 
 # Modelos Pydantic para la API
+class UsuarioSalida(BaseModel):
+    id: uuid.UUID
+    foto: Optional[str]
+    nombre: str
+    apellidos: str
+    email: EmailStr
+    rol: str
+
+    class Config:
+        from_attributes = True
 class CrearUsuario(BaseModel):
     foto: Optional[str] = None
     nombre: str
@@ -223,16 +222,13 @@ class CrearUsuario(BaseModel):
         if "password" in info.data and v != info.data["password"]:
             raise ValueError("Las contraseñas no coinciden")
         return v
-
 class Token(BaseModel):
     token_acceso: str
     tipo_token: str
-
 class CrearNaturaleza(BaseModel):
     nombre: str
     color: str
     icono: Optional[str]
-
 class NaturalezaSalida(BaseModel):
     id: str
     nombre: str
@@ -241,7 +237,6 @@ class NaturalezaSalida(BaseModel):
     creado_por: str
     fecha_creacion: date
     soft_delete: bool
-
     class Config:
         from_attributes = True
 
@@ -256,7 +251,6 @@ class NaturalezaSalida(BaseModel):
             fecha_creacion=obj.fecha_creacion.date() if isinstance(obj.fecha_creacion, datetime) else obj.fecha_creacion,
             soft_delete=obj.soft_delete
         )
-
 class CrearCabecilla(BaseModel):
     foto: Optional[str]
     nombre: str
@@ -276,7 +270,6 @@ class CabecillaSalida(BaseModel):
     creado_por: uuid.UUID
     fecha_creacion: date
     soft_delete: bool
-
     class Config:
         from_attributes = True
         json_encoders = {
@@ -284,7 +277,6 @@ class CabecillaSalida(BaseModel):
             date: lambda v: v.isoformat(),
             datetime: lambda v: v.isoformat(),
         }
-
 class CrearProtesta(BaseModel):
     nombre: str
     naturaleza_id: uuid.UUID
@@ -292,7 +284,6 @@ class CrearProtesta(BaseModel):
     resumen: str
     fecha_evento: date
     cabecillas: List[uuid.UUID]
-
 class ProtestaSalida(BaseModel):
     id: uuid.UUID
     nombre: str
@@ -304,7 +295,6 @@ class ProtestaSalida(BaseModel):
     fecha_creacion: date
     soft_delete: bool
     cabecillas: List[CabecillaSalida]
-
     class Config:
         from_attributes = True
         json_encoders = {
@@ -312,7 +302,6 @@ class ProtestaSalida(BaseModel):
             date: lambda v: v.isoformat(),
             datetime: lambda v: v.isoformat(),
         }
-
 class ProvinciaSalida(BaseModel):
     id: uuid.UUID
     nombre: str
@@ -320,7 +309,6 @@ class ProvinciaSalida(BaseModel):
 
     class Config:
         from_attributes = True
-
 class NuevoCabecilla(BaseModel):
     nombre: str
     apellido: str
@@ -358,81 +346,75 @@ class PaginatedResponse(BaseModel, Generic[T]):
     class Config:
         from_attributes = True
 
-# Funciones auxiliares
+# Funciones Auxiliares de Base de Datos
 def obtener_db():
     db = SesionLocal()
     try:
         yield db
     finally:
         db.close()
-
-def verificar_password(password_plano, password_hash):
+        
+# Funciones de Autenticación y Seguridad
+def verificar_password(password_plano: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password_plano.encode("utf-8"), password_hash.encode("utf-8"))
 
-def obtener_hash_password(password):
+def obtener_hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-def crear_token_acceso(datos: dict, delta_expiracion: Optional[timedelta] = None):
+def crear_token_acceso(datos: dict) -> str:
     a_codificar = datos.copy()
-    if delta_expiracion:
-        expira = datetime.now(timezone.utc) + delta_expiracion
-    else:
-        expira = datetime.now(timezone.utc) + timedelta(minutes=MINUTOS_EXPIRACION_TOKEN_ACCESO)
-    a_codificar.update({"exp": expira, "ultima_actividad": datetime.now(timezone.utc).isoformat()})
+    expira = datetime.now(timezone.utc) + timedelta(minutes=MINUTOS_EXPIRACION_TOKEN_ACCESO)
+    a_codificar.update({
+        "exp": expira.timestamp(),
+        "ultima_actividad": datetime.now(timezone.utc).isoformat()
+    })
     token_jwt_codificado = jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
     return token_jwt_codificado
 
-async def verificar_token_y_actividad(token: str = Depends(oauth2_scheme)):
+def crear_token_actualizacion(datos: dict) -> str:
+    a_codificar = datos.copy()
+    expira = datetime.now(timezone.utc) + timedelta(days=1)
+    a_codificar.update({"exp": expira})
+    token_jwt_codificado = jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
+    return token_jwt_codificado
+
+async def verificar_token_y_actividad(token: str = Depends(oauth2_scheme)) -> str:
     try:
         payload = jwt.decode(token, CLAVE_SECRETA, algorithms=[ALGORITMO])
         email: str = payload.get("sub")
-        ultima_actividad = datetime.fromisoformat(payload.get("ultima_actividad"))
-        if email is None:
+        ultima_actividad_str = payload.get("ultima_actividad")
+
+        if email is None or ultima_actividad_str is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
-        
+
+        ultima_actividad = datetime.fromisoformat(ultima_actividad_str)
         tiempo_inactivo = datetime.now(timezone.utc) - ultima_actividad
+
         if tiempo_inactivo > timedelta(minutes=MINUTOS_INACTIVIDAD_PERMITIDOS):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión expirada por inactividad")
-        
-        # Actualizar el token con la nueva última actividad
-        nuevo_token = crear_token_acceso({"sub": email})
-        return nuevo_token, email
+
+        return email
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
 
 async def obtener_usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(obtener_db)):
-    nuevo_token, email = await verificar_token_y_actividad(token)
+    email = await verificar_token_y_actividad(token)
     usuario = db.query(Usuario).filter(Usuario.email == email).first()
     if usuario is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
-    return usuario, nuevo_token
+    return usuario
 
-# Middleware para actualizar el token en cada petición
-@app.middleware("http")
-async def actualizar_token_actividad(request: Request, call_next):
-    response = await call_next(request)
-    if "Authorization" in request.headers:
-        try:
-            token = request.headers["Authorization"].split()[1]
-            nuevo_token, _ = await verificar_token_y_actividad(token)
-            response.headers["New-Token"] = nuevo_token
-        except HTTPException:
-            # Si hay una excepción, no actualizamos el token
-            pass
-    return response
-
+# Funciones de Control de Acceso
 def es_admin(usuario: Usuario) -> bool:
     return usuario.rol == "admin"
 
 def verificar_admin(usuario: Usuario = Depends(obtener_usuario_actual)):
-    usuario, _ = usuario
     if not es_admin(usuario):
         raise HTTPException(status_code=403, detail="Se requieren permisos de administrador")
     return usuario
 
-def paginar(
-    query, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100)
-):
+# Funciones de Paginación
+def paginar(query, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100)):
     total = query.count()
     items = query.offset((page - 1) * page_size).limit(page_size).all()
     return {
@@ -442,6 +424,21 @@ def paginar(
         "page_size": page_size,
         "pages": (total + page_size - 1) // page_size,
     }
+
+# Middleware
+@app.middleware("http")
+async def actualizar_token_actividad(request: Request, call_next):
+    response = await call_next(request)
+    if "Authorization" in request.headers:
+        try:
+            token = request.headers["Authorization"].split()[1]
+            payload = jwt.decode(token, CLAVE_SECRETA, algorithms=[ALGORITMO])
+            nuevo_token = crear_token_acceso({"sub": payload["sub"]})
+            response.headers["New-Token"] = nuevo_token
+        except JWTError:
+            # Si hay una excepción, no actualizamos el token
+            pass
+    return response
 
 UPLOAD_DIRECTORY = os.getenv("UPLOAD_DIRECTORY")
 MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE"))
@@ -488,12 +485,10 @@ def listar_usuarios(
         raise HTTPException(status_code=500, detail="Error interno del servidor")
     
 @app.get("/usuarios/me", response_model=UsuarioSalida)
-async def obtener_usuario_actual_ruta(usuario_y_token: tuple = Depends(obtener_usuario_actual)):
-    usuario, nuevo_token = usuario_y_token
-    return UsuarioSalida.from_orm(usuario)
+async def obtener_usuario_actual_ruta(usuario: Usuario = Depends(obtener_usuario_actual)):
+    return UsuarioSalida.model_validate(usuario)
 
-def verificar_autenticacion(usuario_y_token: tuple = Depends(obtener_usuario_actual)):
-    usuario, _ = usuario_y_token
+def verificar_autenticacion(usuario: Usuario = Depends(obtener_usuario_actual)):
     if not usuario:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
     return usuario
@@ -576,29 +571,49 @@ async def login_para_token_acceso(
             headers={"WWW-Authenticate": "Bearer"},
         )
     token_acceso = crear_token_acceso({"sub": usuario.email})
+    token_actualizacion = crear_token_actualizacion({"sub": usuario.email})
     return {
         "token_acceso": token_acceso,
+        "token_actualizacion": token_actualizacion,
         "tipo_token": "bearer",
     }
 
 @app.post("/token/renovar", response_model=Token)
-def renovar_token(
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+async def renovar_token(
+    token_actualizacion: str = Body(..., embed=True),
     db: Session = Depends(obtener_db)
 ):
-    usuario, _ = usuario_actual
-    nuevo_token_acceso = crear_token_acceso({"sub": usuario.email})
-    return {
-        "token_acceso": nuevo_token_acceso,
-        "tipo_token": "bearer",
-    }
+    try:
+        payload = jwt.decode(token_actualizacion, CLAVE_SECRETA, algorithms=[ALGORITMO])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización inválido")
+        
+        usuario = db.query(Usuario).filter(Usuario.email == email).first()
+        if usuario is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
+        
+        nuevo_token_acceso = crear_token_acceso({"sub": email})
+        # No creamos un nuevo token de actualización cada vez, solo cuando está cerca de expirar
+        tiempo_expiracion = payload.get("exp") - datetime.now(timezone.utc).timestamp()
+        if tiempo_expiracion < 3600:  # Si falta menos de una hora para que expire
+            nuevo_token_actualizacion = crear_token_actualizacion({"sub": email})
+        else:
+            nuevo_token_actualizacion = token_actualizacion
+        
+        return {
+            "token_acceso": nuevo_token_acceso,
+            "token_actualizacion": nuevo_token_actualizacion,
+            "tipo_token": "bearer",
+        }
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización inválido o expirado")
 
 @app.get("/pagina-principal", response_model=ResumenPrincipal)
 def obtener_resumen_principal(
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     total_protestas = db.query(Protesta).filter(Protesta.soft_delete == False).count()
     protestas_recientes = (
         db.query(Protesta)
@@ -615,10 +630,9 @@ def obtener_resumen_principal(
 @app.post("/naturalezas", response_model=NaturalezaSalida)
 def crear_naturaleza(
     naturaleza: CrearNaturaleza,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     try:
         db_naturaleza = Naturaleza(
             **naturaleza.model_dump(), creado_por=usuario.id
@@ -667,10 +681,9 @@ async def crear_cabecilla(
     telefono: str = Form(None),
     direccion: str = Form(None),
     foto: UploadFile = File(None),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     try:
         # Crear el objeto Cabecilla sin la foto primero
         cabecilla_data = {
@@ -736,10 +749,9 @@ async def crear_cabecilla(
 @app.post("/protestas/completa", response_model=ProtestaSalida)
 def crear_protesta_completa(
     protesta: CrearProtestaCompleta,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     # Crear nueva naturaleza si se proporciona
     if protesta.nueva_naturaleza:
         nueva_naturaleza = Naturaleza(
@@ -784,10 +796,9 @@ def crear_protesta_completa(
 @app.post("/protestas", response_model=ProtestaSalida)
 def crear_protesta(
     protesta: CrearProtesta,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     try:
         # Validar que la naturaleza y la provincia existen
         naturaleza = db.query(Naturaleza).get(protesta.naturaleza_id)
@@ -845,7 +856,7 @@ def obtener_protestas(
     fecha_hasta: Optional[date] = None,
     provincia_id: Optional[uuid.UUID] = None,
     naturaleza_id: Optional[uuid.UUID] = None,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
     query = db.query(Protesta).filter(Protesta.soft_delete == False)
@@ -876,8 +887,8 @@ def obtener_protestas(
 @app.get("/protestas/{protesta_id}", response_model=ProtestaSalida)
 def obtener_protesta(
     protesta_id: str,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db)
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
 ):
     try:
         # Convertir el string a UUID
@@ -933,10 +944,9 @@ def obtener_protesta(
 def actualizar_protesta(
     protesta_id: uuid.UUID,
     protesta: CrearProtesta,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     try:
         db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id).first()
         if not db_protesta:
@@ -995,8 +1005,8 @@ def eliminar_protesta(
 
 @app.get("/provincias", response_model=List[ProvinciaSalida])
 def obtener_provincias(
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db)
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
 ):
     try:
         provincias = db.query(Provincia).filter(Provincia.soft_delete == False).all()
@@ -1013,8 +1023,8 @@ def obtener_provincias(
 @app.get("/provincias/{provincia_id}", response_model=ProvinciaSalida)
 def obtener_provincia(
     provincia_id: uuid.UUID,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db)
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
 ):
     try:
         provincia = (
@@ -1033,8 +1043,8 @@ def obtener_naturalezas(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     nombre: Optional[str] = None,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db)
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
 ):
     try:
         query = db.query(Naturaleza).filter(Naturaleza.soft_delete == False)
@@ -1067,8 +1077,8 @@ def obtener_naturalezas(
 @app.get("/naturalezas/{naturaleza_id}", response_model=NaturalezaSalida)
 def obtener_naturaleza(
     naturaleza_id: uuid.UUID,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db)
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
 ):
     try:
         naturaleza = (
@@ -1099,10 +1109,9 @@ def obtener_naturaleza(
 def actualizar_naturaleza(
     naturaleza_id: uuid.UUID,
     naturaleza: CrearNaturaleza,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     try:
         db_naturaleza = (
             db.query(Naturaleza)
@@ -1144,16 +1153,15 @@ def actualizar_naturaleza(
 @app.delete("/naturalezas/{naturaleza_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_naturaleza(
     naturaleza_id: uuid.UUID,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     try:
         db_naturaleza = (
             db.query(Naturaleza)
             .filter(
                 Naturaleza.id == naturaleza_id,
-                Naturaleza.creado_por == usuario_actual.id,
+                Naturaleza.creado_por == usuario.id,
             )
             .first()
         )
@@ -1190,8 +1198,8 @@ def obtener_cabecillas(
     nombre: Optional[str] = None,
     apellido: Optional[str] = None,
     cedula: Optional[str] = None,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db)
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
 ):
     try:
         query = db.query(Cabecilla).filter(Cabecilla.soft_delete == False)
@@ -1227,8 +1235,8 @@ def obtener_cabecillas(
 @app.get("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
 def obtener_cabecilla(
     cabecilla_id: uuid.UUID,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db)
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
 ):
     try:
         cabecilla = (
@@ -1259,10 +1267,9 @@ def obtener_cabecilla(
 def actualizar_cabecilla(
     cabecilla_id: uuid.UUID,
     cabecilla: CrearCabecilla,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     try:
         db_cabecilla = (
             db.query(Cabecilla)
@@ -1303,10 +1310,9 @@ def actualizar_cabecilla(
 @app.delete("/cabecillas/{cabecilla_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_cabecilla(
     cabecilla_id: uuid.UUID,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     try:
         db_cabecilla = (
             db.query(Cabecilla)
@@ -1380,10 +1386,9 @@ def save_upload_file(upload_file: UploadFile, destination: str) -> str:
 @app.post("/usuarios/foto", response_model=UsuarioSalida)
 async def actualizar_foto_usuario(
     foto: UploadFile = File(...),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     validate_image(foto)
     file_name = f"{usuario.id}_{foto.filename}"
     file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
@@ -1397,10 +1402,9 @@ async def actualizar_foto_usuario(
 async def actualizar_foto_cabecilla(
     cabecilla_id: uuid.UUID,
     foto: UploadFile = File(...),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    usuario, _ = usuario_actual
     cabecilla = (
         db.query(Cabecilla)
         .filter(Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id)
