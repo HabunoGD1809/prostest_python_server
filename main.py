@@ -16,9 +16,8 @@ from fastapi import (Body, FastAPI, Depends, File, Form, HTTPException, Query, R
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from jose import ExpiredSignatureError, jwt, JWTError
+from jose import jwt, JWTError
 from fastapi import HTTPException, status
-from jwt import InvalidTokenError
 from sqlalchemy import DateTime, create_engine, Column, String, Boolean, Date, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
