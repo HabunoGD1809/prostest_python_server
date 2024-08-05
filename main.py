@@ -1,5 +1,6 @@
 # Librerías estándar
 import asyncio
+import logging
 import os
 import shutil
 import sys
@@ -15,8 +16,9 @@ from fastapi import (Body, FastAPI, Depends, File, Form, HTTPException, Query, R
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from jose import jwt, JWTError
+from jose import ExpiredSignatureError, jwt, JWTError
 from fastapi import HTTPException, status
+from jwt import InvalidTokenError
 from sqlalchemy import DateTime, create_engine, Column, String, Boolean, Date, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
@@ -224,6 +226,7 @@ class CrearUsuario(BaseModel):
         return v
 class Token(BaseModel):
     token_acceso: str
+    token_actualizacion: str
     tipo_token: str
 class CrearNaturaleza(BaseModel):
     nombre: str
@@ -361,9 +364,13 @@ def verificar_password(password_plano: str, password_hash: str) -> bool:
 def obtener_hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 def crear_token_acceso(datos: dict) -> str:
     a_codificar = datos.copy()
-    expira = datetime.now(timezone.utc) + timedelta(minutes=MINUTOS_EXPIRACION_TOKEN_ACCESO)
+    expira = datetime.now(timezone.utc) + timedelta(minutes=15)  # 15 minutos de expiración
     a_codificar.update({
         "exp": expira.timestamp(),
         "ultima_actividad": datetime.now(timezone.utc).isoformat()
@@ -373,8 +380,8 @@ def crear_token_acceso(datos: dict) -> str:
 
 def crear_token_actualizacion(datos: dict) -> str:
     a_codificar = datos.copy()
-    expira = datetime.now(timezone.utc) + timedelta(days=1)
-    a_codificar.update({"exp": expira})
+    expira = datetime.now(timezone.utc) + timedelta(days=1)  # 1 día de expiración
+    a_codificar.update({"exp": expira.timestamp()})
     token_jwt_codificado = jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
     return token_jwt_codificado
 
@@ -385,17 +392,31 @@ async def verificar_token_y_actividad(token: str = Depends(oauth2_scheme)) -> st
         ultima_actividad_str = payload.get("ultima_actividad")
 
         if email is None or ultima_actividad_str is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, 
+                detail="Token inválido"
+            )
 
         ultima_actividad = datetime.fromisoformat(ultima_actividad_str)
         tiempo_inactivo = datetime.now(timezone.utc) - ultima_actividad
 
         if tiempo_inactivo > timedelta(minutes=MINUTOS_INACTIVIDAD_PERMITIDOS):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión expirada por inactividad")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, 
+                detail="Sesión expirada por inactividad"
+            )
 
         return email
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="Token expirado"
+        )
     except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="Token inválido"
+        )
 
 async def obtener_usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(obtener_db)):
     email = await verificar_token_y_actividad(token)
@@ -563,8 +584,10 @@ async def login_para_token_acceso(
     form_data: OAuth2PasswordRequestForm = Depends(), 
     db: Session = Depends(obtener_db)
 ):
+    logger.info(f"Intento de inicio de sesión para: {form_data.username}")
     usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
     if not usuario or not verificar_password(form_data.password, usuario.password):
+        logger.warning(f"Intento de inicio de sesión fallido para: {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email o contraseña incorrectos",
@@ -572,11 +595,14 @@ async def login_para_token_acceso(
         )
     token_acceso = crear_token_acceso({"sub": usuario.email})
     token_actualizacion = crear_token_actualizacion({"sub": usuario.email})
-    return {
-        "token_acceso": token_acceso,
-        "token_actualizacion": token_actualizacion,
-        "tipo_token": "bearer",
-    }
+    logger.info(f"Inicio de sesión exitoso para: {usuario.email}")
+    logger.debug(f"Token de acceso generado: {token_acceso}")
+    logger.debug(f"Token de actualización generado: {token_actualizacion}")
+    return Token(
+        token_acceso=token_acceso,
+        token_actualizacion=token_actualizacion,
+        tipo_token="bearer"
+    )
 
 @app.post("/token/renovar", response_model=Token)
 async def renovar_token(
@@ -584,35 +610,56 @@ async def renovar_token(
     db: Session = Depends(obtener_db)
 ):
     try:
-        payload = jwt.decode(token_actualizacion, CLAVE_SECRETA, algorithms=[ALGORITMO])
+        logger.info("Intento de renovación de token")
+        logger.debug(f"Token de actualización recibido: {token_actualizacion}")
+        
+        if not token_actualizacion or not isinstance(token_actualizacion, str):
+            logger.error(f"Token de actualización inválido: {token_actualizacion}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token de actualización inválido")
+        
+        try:
+            payload = jwt.decode(token_actualizacion, CLAVE_SECRETA, algorithms=[ALGORITMO])
+            logger.debug(f"Payload decodificado: {payload}")
+        except jwt.JWTError as e:
+            logger.error(f"Error al decodificar el token: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Token inválido: {str(e)}")
+        
         email: str = payload.get("sub")
-        if email is None:
+        exp: float = payload.get("exp")
+        
+        if email is None or exp is None:
+            logger.warning(f"Payload del token inválido: {payload}")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización inválido")
+        
+        # Verificar si el token ha expirado
+        if datetime.now(timezone.utc).timestamp() > exp:
+            logger.warning(f"Token de actualización expirado para: {email}")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización expirado")
         
         usuario = db.query(Usuario).filter(Usuario.email == email).first()
         if usuario is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
-        
-        # Verificar si el token ha expirado
-        exp = payload.get("exp")
-        if exp is None or datetime.now(timezone.utc).timestamp() > exp:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización expirado")
+            logger.warning(f"Usuario no encontrado para el email: {email}")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
         
         nuevo_token_acceso = crear_token_acceso({"sub": email})
+        logger.debug(f"Nuevo token de acceso generado: {nuevo_token_acceso}")
+        
+        # Calcular el tiempo restante para la expiración del token de actualización
         tiempo_expiracion = exp - datetime.now(timezone.utc).timestamp()
         if tiempo_expiracion < 3600:  # Si falta menos de una hora para que expire
+            logger.info(f"Creando nuevo token de actualización para: {email}")
             nuevo_token_actualizacion = crear_token_actualizacion({"sub": email})
         else:
             nuevo_token_actualizacion = token_actualizacion
         
-        return {
-            "token_acceso": nuevo_token_acceso,
-            "token_actualizacion": nuevo_token_actualizacion,
-            "tipo_token": "bearer",
-        }
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización inválido o expirado")
+        logger.info(f"Token renovado exitosamente para: {email}")
+        return Token(
+            token_acceso=nuevo_token_acceso,
+            token_actualizacion=nuevo_token_actualizacion,
+            tipo_token="bearer"
+        )
     except Exception as e:
+        logger.exception(f"Error inesperado durante la renovación del token: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/pagina-principal", response_model=ResumenPrincipal)
