@@ -370,7 +370,7 @@ logger = logging.getLogger(__name__)
 
 def crear_token_acceso(datos: dict) -> str:
     a_codificar = datos.copy()
-    expira = datetime.now(timezone.utc) + timedelta(minutes=15)  # 15 minutos de expiración
+    expira = datetime.now(timezone.utc) + timedelta(minutes=MINUTOS_INACTIVIDAD_PERMITIDOS)  # 15 minutos de expiración
     a_codificar.update({
         "exp": expira.timestamp(),
         "ultima_actividad": datetime.now(timezone.utc).isoformat()
