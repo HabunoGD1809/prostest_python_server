@@ -513,6 +513,58 @@ def verificar_autenticacion(usuario: Usuario = Depends(obtener_usuario_actual)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
     return usuario
 
+# nuevas rutas admin
+@app.post("/admin/usuarios", response_model=UsuarioSalida)
+def crear_usuario_admin(
+    usuario: CrearUsuario,
+    admin: Usuario = Depends(verificar_admin),
+    db: Session = Depends(obtener_db),
+):
+    try:
+        hash_password = obtener_hash_password(usuario.password)
+        db_usuario = Usuario(
+            foto=usuario.foto,
+            nombre=usuario.nombre,
+            apellidos=usuario.apellidos,
+            email=usuario.email,
+            password=hash_password,
+            rol=usuario.rol if usuario.rol else "usuario"
+        )
+        db.add(db_usuario)
+        db.commit()
+        db.refresh(db_usuario)
+        print(Fore.GREEN + f"Usuario creado exitosamente por admin: {usuario.email}" + Style.RESET_ALL)
+        return db_usuario
+    except IntegrityError as e:
+        db.rollback()
+        if "usuarios_email_key" in str(e.orig):
+            raise HTTPException(status_code=400, detail=f"Ya existe un usuario con el email '{usuario.email}'")
+        raise HTTPException(status_code=400, detail="Error al crear el usuario")
+    except Exception as e:
+        db.rollback()
+        print(Fore.RED + f"Error al crear usuario: {str(e)}" + Style.RESET_ALL)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+@app.delete("/admin/usuarios/{usuario_id}", status_code=status.HTTP_204_NO_CONTENT)
+def eliminar_usuario_admin(
+    usuario_id: uuid.UUID,
+    admin: Usuario = Depends(verificar_admin),
+    db: Session = Depends(obtener_db),
+):
+    try:
+        db_usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
+        if not db_usuario:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+        db_usuario.soft_delete = True
+        db.commit()
+        print(Fore.GREEN + f"Usuario eliminado exitosamente por admin: {db_usuario.email}" + Style.RESET_ALL)
+        return {"detail": "Usuario eliminado exitosamente"}
+    except Exception as e:
+        db.rollback()
+        print(Fore.RED + f"Error al eliminar usuario: {str(e)}" + Style.RESET_ALL)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
 @app.post("/registro", response_model=UsuarioSalida)
 async def registrar_usuario(
     nombre: str = Form(...),
@@ -1205,35 +1257,25 @@ def actualizar_naturaleza(
 @app.delete("/naturalezas/{naturaleza_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_naturaleza(
     naturaleza_id: uuid.UUID,
-    usuario: Usuario = Depends(obtener_usuario_actual),
+    admin: Usuario = Depends(verificar_admin),  # Cambiado a verificar_admin
     db: Session = Depends(obtener_db),
 ):
     try:
-        db_naturaleza = (
-            db.query(Naturaleza)
-            .filter(
-                Naturaleza.id == naturaleza_id,
-                Naturaleza.creado_por == usuario.id,
-            )
-            .first()
-        )
+        db_naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id).first()
         if not db_naturaleza:
-            print(
-                Fore.YELLOW
-                + f"Naturaleza no encontrada o sin permisos para eliminar: {naturaleza_id}"
-                + Style.RESET_ALL
-            )
+            raise HTTPException(status_code=404, detail="Naturaleza no encontrada")
+
+        # Verificar si la naturaleza está asociada a alguna protesta
+        protestas_asociadas = db.query(Protesta).filter(Protesta.naturaleza_id == naturaleza_id).first()
+        if protestas_asociadas:
             raise HTTPException(
-                status_code=404,
-                detail="Naturaleza no encontrada o no tienes permiso para eliminarla",
+                status_code=400,
+                detail="No se puede eliminar una naturaleza asociada a protestas. Elimine o edite las protestas primero."
             )
+
         db_naturaleza.soft_delete = True
         db.commit()
-        print(
-            Fore.GREEN
-            + f"Naturaleza eliminada exitosamente: {db_naturaleza.nombre}"
-            + Style.RESET_ALL
-        )
+        print(Fore.GREEN + f"Naturaleza eliminada exitosamente por admin: {db_naturaleza.nombre}" + Style.RESET_ALL)
         return {"detail": "Naturaleza eliminada exitosamente"}
     except HTTPException as he:
         raise he
@@ -1362,45 +1404,21 @@ def actualizar_cabecilla(
 @app.delete("/cabecillas/{cabecilla_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_cabecilla(
     cabecilla_id: uuid.UUID,
-    usuario: Usuario = Depends(obtener_usuario_actual),
+    usuario: Usuario = Depends(verificar_admin),  # Cambiado a verificar_admin
     db: Session = Depends(obtener_db),
 ):
     try:
-        db_cabecilla = (
-            db.query(Cabecilla)
-            .filter(
-                Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id
-            )
-            .first()
-        )
+        db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id).first()
         if not db_cabecilla:
-            raise HTTPException(
-                status_code=404,
-                detail="Cabecilla no encontrado o no tienes permiso para eliminarlo",
-            )
+            raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
 
-        # Verificar si el cabecilla está asignado a alguna protesta
-        protestas_asociadas = (
-            db.query(ProtestaCabecilla)
-            .filter(ProtestaCabecilla.cabecilla_id == cabecilla_id)
-            .first()
-        )
-        if protestas_asociadas:
-            raise HTTPException(
-                status_code=400,
-                detail="No se puede eliminar un cabecilla asignado a protestas",
-            )
+        # Eliminar asociaciones con protestas
+        db.query(ProtestaCabecilla).filter(ProtestaCabecilla.cabecilla_id == cabecilla_id).delete()
 
         db_cabecilla.soft_delete = True
         db.commit()
-        print(
-            Fore.GREEN
-            + f"Cabecilla eliminado exitosamente: {db_cabecilla.nombre} {db_cabecilla.apellido}"
-            + Style.RESET_ALL
-        )
+        print(Fore.GREEN + f"Cabecilla eliminado exitosamente por admin: {db_cabecilla.nombre} {db_cabecilla.apellido}" + Style.RESET_ALL)
         return {"detail": "Cabecilla eliminado exitosamente"}
-    except HTTPException as he:
-        raise he
     except Exception as e:
         db.rollback()
         print(Fore.RED + f"Error al eliminar cabecilla: {str(e)}" + Style.RESET_ALL)
