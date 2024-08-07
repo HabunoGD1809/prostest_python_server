@@ -16,6 +16,7 @@ from fastapi import (Body, FastAPI, Depends, File, Form, HTTPException, Query, R
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from jose import jwt, JWTError
 from fastapi import HTTPException, status
 from sqlalchemy import DateTime, create_engine, Column, String, Boolean, Date, ForeignKey
@@ -26,7 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.schema import CreateSchema
 from sqlalchemy.sql import text
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, validator
 import psycopg2
 import bcrypt
 import uvicorn
@@ -272,6 +273,10 @@ class CabecillaSalida(BaseModel):
     creado_por: uuid.UUID
     fecha_creacion: date
     soft_delete: bool
+    
+    @validator('foto', pre=True)
+    def get_full_foto_url(cls, v):
+        return get_full_image_url(v)
     class Config:
         from_attributes = True
         json_encoders = {
@@ -480,6 +485,21 @@ def cambiar_rol_usuario(
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
         
+        # Verificar si el admin está intentando cambiar su propio rol
+        if usuario.id == admin_actual.id:
+            raise HTTPException(status_code=422, detail="No puedes cambiar tu propio rol de administrador")
+        
+        # Verificar si se está intentando cambiar el rol del último administrador
+        if usuario.rol == 'admin' and nuevo_rol == 'usuario':
+            admin_count = db.query(Usuario).filter(Usuario.rol == 'admin', Usuario.soft_delete == False).count()
+            if admin_count == 1:
+                raise HTTPException(status_code=422, detail="No se puede cambiar el rol del último administrador")
+
+        # Verificar si el rol ya es el que se está intentando asignar
+        if usuario.rol == nuevo_rol:
+            return usuario  # Retornar el usuario sin cambios si el rol es el mismo
+
+        # Permitir cambiar el rol de otros usuarios
         usuario.rol = nuevo_rol
         db.commit()
         db.refresh(usuario)
@@ -490,7 +510,7 @@ def cambiar_rol_usuario(
     except Exception as e:
         db.rollback()
         print(Fore.RED + f"Error al cambiar rol de usuario: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/usuarios", response_model=List[UsuarioSalida])
 def listar_usuarios(
@@ -806,21 +826,17 @@ async def crear_cabecilla(
         if foto:
             file_extension = os.path.splitext(foto.filename)[1]
             file_name = f"cabecilla_{db_cabecilla.id}{file_extension}"
-            file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
+            relative_path = os.path.join(UPLOAD_DIR, file_name)
+            file_path = os.path.join(STATIC_FILES_DIR, relative_path)
 
-            with open(file_path, "wb") as buffer:
-                content = await foto.read()
-                buffer.write(content)
-
-            db_cabecilla.foto = file_path
+            if save_upload_file(foto, file_path):
+                db_cabecilla.foto = relative_path
+            else:
+                db.rollback()
+                raise HTTPException(status_code=500, detail="Error al guardar la imagen")
 
         db.commit()
         db.refresh(db_cabecilla)
-        print(
-            Fore.GREEN
-            + f"Cabecilla creado exitosamente: {nombre} {apellido}"
-            + Style.RESET_ALL
-        )
         return db_cabecilla
 
     except IntegrityError as e:
@@ -1424,6 +1440,19 @@ def eliminar_cabecilla(
         print(Fore.RED + f"Error al eliminar cabecilla: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+# NUEVO ENDPOINT
+@app.get("/cabecillas/all", response_model=List[CabecillaSalida])
+def obtener_todos_los_cabecillas(
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
+):
+    try:
+        cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).all()
+        return [CabecillaSalida.model_validate(c) for c in cabecillas]
+    except Exception as e:
+        print(Fore.RED + f"Error al obtener todos los cabecillas: {str(e)}" + Style.RESET_ALL)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
 def validate_image(file: UploadFile):
     # Verificar el tamaño del archivo
     file.file.seek(0, 2)
@@ -1445,13 +1474,21 @@ def validate_image(file: UploadFile):
             detail=f"Tipo de archivo no permitido. Solo se aceptan {', '.join(ALLOWED_IMAGE_TYPES)}.",
         )
 
+# Configurar la ruta base para los archivos estáticos
+STATIC_FILES_DIR = "static"
+UPLOAD_DIR = "uploads"
+app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
+
+# Función auxiliar para guardar el archivo
 def save_upload_file(upload_file: UploadFile, destination: str) -> str:
     try:
         with open(destination, "wb") as buffer:
-            shutil.copyfileobj(upload_file.file, buffer)
-    finally:
-        upload_file.file.close()
-    return destination
+            content = upload_file.file.read()
+            buffer.write(content)
+        return destination
+    except Exception as e:
+        print(f"Error al guardar el archivo: {str(e)}")
+        return None
 
 @app.post("/usuarios/foto", response_model=UsuarioSalida)
 async def actualizar_foto_usuario(
@@ -1468,6 +1505,12 @@ async def actualizar_foto_usuario(
     db.commit()
     return usuario
 
+# Modificar la función para obtener la URL completa de la foto
+def get_full_image_url(foto_path: str) -> str:
+    if foto_path:
+        return f"/static/{foto_path}"
+    return None
+
 @app.post("/cabecillas/{cabecilla_id}/foto", response_model=CabecillaSalida)
 async def actualizar_foto_cabecilla(
     cabecilla_id: uuid.UUID,
@@ -1475,25 +1518,22 @@ async def actualizar_foto_cabecilla(
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    cabecilla = (
-        db.query(Cabecilla)
-        .filter(Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id)
-        .first()
-    )
+    cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id).first()
     if not cabecilla:
-        raise HTTPException(
-            status_code=404,
-            detail="Cabecilla no encontrado o no tienes permiso para editarlo",
-        )
+        raise HTTPException(status_code=404, detail="Cabecilla no encontrado o no tienes permiso para editarlo")
 
     validate_image(foto)
-    file_name = f"cabecilla_{cabecilla_id}_{foto.filename}"
-    file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
-    save_upload_file(foto, file_path)
-
-    cabecilla.foto = file_path
-    db.commit()
-    return cabecilla
+    file_extension = os.path.splitext(foto.filename)[1]
+    file_name = f"cabecilla_{cabecilla_id}{file_extension}"
+    relative_path = os.path.join(UPLOAD_DIR, file_name)
+    file_path = os.path.join(STATIC_FILES_DIR, relative_path)
+    
+    if save_upload_file(foto, file_path):
+        cabecilla.foto = relative_path
+        db.commit()
+        return cabecilla
+    else:
+        raise HTTPException(status_code=500, detail="Error al guardar la imagen")
 
 # Manejadores de excepciones
 @app.exception_handler(HTTPException)
