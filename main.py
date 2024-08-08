@@ -27,7 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.schema import CreateSchema
 from sqlalchemy.sql import text
-from pydantic import BaseModel, EmailStr, Field, field_validator, validator
+from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator, validator
 import psycopg2
 import bcrypt
 import uvicorn
@@ -141,7 +141,7 @@ class Usuario(Base):
     apellidos = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
     password = Column(String, nullable=False)
-    fecha_creacion = Column(Date, default=date.today())
+    fecha_creacion = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     soft_delete = Column(Boolean, default=False)
     rol = Column(String, default="usuario", nullable=False)
 
@@ -200,7 +200,7 @@ class ProtestaCabecilla(Base):
     protesta_id = Column(GUID(), ForeignKey("api.protestas.id"), primary_key=True)
     cabecilla_id = Column(GUID(), ForeignKey("api.cabecillas.id"), primary_key=True)
 
-# Modelos Pydantic para la API
+# Modelos Pydantic
 class UsuarioSalida(BaseModel):
     id: uuid.UUID
     foto: Optional[str]
@@ -208,9 +208,11 @@ class UsuarioSalida(BaseModel):
     apellidos: str
     email: EmailStr
     rol: str
+    fecha_creacion: datetime
 
     class Config:
         from_attributes = True
+
 class CrearUsuario(BaseModel):
     foto: Optional[str] = None
     nombre: str
@@ -218,11 +220,18 @@ class CrearUsuario(BaseModel):
     email: EmailStr
     password: str
     repetir_password: str
+    rol: Optional[str] = "usuario"
 
     @field_validator("repetir_password")
     def passwords_match(cls, v, info):
         if "password" in info.data and v != info.data["password"]:
             raise ValueError("Las contraseñas no coinciden")
+        return v
+
+    @field_validator("rol")
+    def validate_rol(cls, v):
+        if v not in ["usuario", "admin"]:
+            raise ValueError("El rol debe ser 'usuario' o 'admin'")
         return v
 class Token(BaseModel):
     token_acceso: str
@@ -477,7 +486,7 @@ if not os.path.exists(UPLOAD_DIRECTORY):
 def cambiar_rol_usuario(
     usuario_id: uuid.UUID,
     nuevo_rol: str = Query(..., regex="^(admin|usuario)$"),
-    admin_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
     try:
@@ -485,9 +494,12 @@ def cambiar_rol_usuario(
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
         
-        # Verificar si el admin está intentando cambiar su propio rol
-        if usuario.id == admin_actual.id:
-            raise HTTPException(status_code=422, detail="No puedes cambiar tu propio rol de administrador")
+        if usuario_actual.rol != 'admin':
+            raise HTTPException(status_code=403, detail="Solo los administradores pueden cambiar roles")
+        
+        # Permitir que un admin cambie su propio rol, pero con advertencia
+        if usuario.id == usuario_actual.id:
+            print(Fore.YELLOW + "Advertencia: Estás cambiando tu propio rol de administrador" + Style.RESET_ALL)
         
         # Verificar si se está intentando cambiar el rol del último administrador
         if usuario.rol == 'admin' and nuevo_rol == 'usuario':
@@ -499,7 +511,7 @@ def cambiar_rol_usuario(
         if usuario.rol == nuevo_rol:
             return usuario  # Retornar el usuario sin cambios si el rol es el mismo
 
-        # Permitir cambiar el rol de otros usuarios
+        # Permitir cambiar el rol
         usuario.rol = nuevo_rol
         db.commit()
         db.refresh(usuario)
@@ -535,20 +547,28 @@ def verificar_autenticacion(usuario: Usuario = Depends(obtener_usuario_actual)):
 
 # nuevas rutas admin
 @app.post("/admin/usuarios", response_model=UsuarioSalida)
-def crear_usuario_admin(
+async def crear_usuario_admin(
     usuario: CrearUsuario,
     admin: Usuario = Depends(verificar_admin),
-    db: Session = Depends(obtener_db),
+    db: Session = Depends(obtener_db)
 ):
     try:
         hash_password = obtener_hash_password(usuario.password)
+        foto_path = None
+        if usuario.foto:
+            validate_image(usuario.foto)
+            file_name = f"usuario_{uuid.uuid4()}_{usuario.foto.filename}"
+            file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
+            await save_upload_file(usuario.foto, file_path)
+            foto_path = file_path
+
         db_usuario = Usuario(
-            foto=usuario.foto,
+            foto=foto_path,
             nombre=usuario.nombre,
             apellidos=usuario.apellidos,
             email=usuario.email,
             password=hash_password,
-            rol=usuario.rol if usuario.rol else "usuario"
+            rol=usuario.rol
         )
         db.add(db_usuario)
         db.commit()
@@ -1342,6 +1362,19 @@ def obtener_cabecillas(
         print(Fore.RED + f"Error al obtener cabecillas: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+# NUEVO ENDPOINT
+@app.get("/cabecillas/all", response_model=List[CabecillaSalida])
+def obtener_todos_los_cabecillas(
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
+):
+    try:
+        cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).all()
+        return [CabecillaSalida.model_validate(c) for c in cabecillas]
+    except Exception as e:
+        print(Fore.RED + f"Error al obtener todos los cabecillas: {str(e)}" + Style.RESET_ALL)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
 @app.get("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
 def obtener_cabecilla(
     cabecilla_id: uuid.UUID,
@@ -1427,7 +1460,7 @@ def eliminar_cabecilla(
         db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id).first()
         if not db_cabecilla:
             raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
-
+        
         # Eliminar asociaciones con protestas
         db.query(ProtestaCabecilla).filter(ProtestaCabecilla.cabecilla_id == cabecilla_id).delete()
 
@@ -1438,19 +1471,6 @@ def eliminar_cabecilla(
     except Exception as e:
         db.rollback()
         print(Fore.RED + f"Error al eliminar cabecilla: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
-
-# NUEVO ENDPOINT
-@app.get("/cabecillas/all", response_model=List[CabecillaSalida])
-def obtener_todos_los_cabecillas(
-    usuario: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db),
-):
-    try:
-        cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).all()
-        return [CabecillaSalida.model_validate(c) for c in cabecillas]
-    except Exception as e:
-        print(Fore.RED + f"Error al obtener todos los cabecillas: {str(e)}" + Style.RESET_ALL)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 def validate_image(file: UploadFile):
@@ -1480,11 +1500,11 @@ UPLOAD_DIR = "uploads"
 app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
 
 # Función auxiliar para guardar el archivo
-def save_upload_file(upload_file: UploadFile, destination: str) -> str:
+async def save_upload_file(upload_file: UploadFile, destination: str) -> str:
     try:
+        contents = await upload_file.read()
         with open(destination, "wb") as buffer:
-            content = upload_file.file.read()
-            buffer.write(content)
+            buffer.write(contents)
         return destination
     except Exception as e:
         print(f"Error al guardar el archivo: {str(e)}")
