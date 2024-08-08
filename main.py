@@ -676,7 +676,7 @@ async def login_para_token_acceso(
     db: Session = Depends(obtener_db)
 ):
     logger.info(f"Intento de inicio de sesión para: {form_data.username}")
-    usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
+    usuario = db.query(Usuario).filter(Usuario.email == form_data.username, Usuario.soft_delete == False).first()
     if not usuario or not verificar_password(form_data.password, usuario.password):
         logger.warning(f"Intento de inicio de sesión fallido para: {form_data.username}")
         raise HTTPException(
