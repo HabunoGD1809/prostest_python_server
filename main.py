@@ -240,7 +240,7 @@ class Token(BaseModel):
 class CrearNaturaleza(BaseModel):
     nombre: str
     color: str
-    icono: Optional[str]
+    icono: str
 class NaturalezaSalida(BaseModel):
     id: str
     nombre: str
@@ -249,6 +249,7 @@ class NaturalezaSalida(BaseModel):
     creado_por: str
     fecha_creacion: date
     soft_delete: bool
+    
     class Config:
         from_attributes = True
 
@@ -286,6 +287,7 @@ class CabecillaSalida(BaseModel):
     @validator('foto', pre=True)
     def get_full_foto_url(cls, v):
         return get_full_image_url(v)
+    
     class Config:
         from_attributes = True
         json_encoders = {
@@ -497,15 +499,16 @@ def cambiar_rol_usuario(
         if usuario_actual.rol != 'admin':
             raise HTTPException(status_code=403, detail="Solo los administradores pueden cambiar roles")
         
-        # Permitir que un admin cambie su propio rol, pero con advertencia
-        if usuario.id == usuario_actual.id:
-            print(Fore.YELLOW + "Advertencia: Estás cambiando tu propio rol de administrador" + Style.RESET_ALL)
-        
         # Verificar si se está intentando cambiar el rol del último administrador
         if usuario.rol == 'admin' and nuevo_rol == 'usuario':
             admin_count = db.query(Usuario).filter(Usuario.rol == 'admin', Usuario.soft_delete == False).count()
             if admin_count == 1:
                 raise HTTPException(status_code=422, detail="No se puede cambiar el rol del último administrador")
+
+        # Verificar si el usuario actual está intentando cambiar su propio rol
+        if usuario.id == usuario_actual.id:
+            if nuevo_rol != usuario_actual.rol:
+                raise HTTPException(status_code=403, detail="No puedes cambiar tu propio rol")
 
         # Verificar si el rol ya es el que se está intentando asignar
         if usuario.rol == nuevo_rol:
@@ -545,7 +548,7 @@ def verificar_autenticacion(usuario: Usuario = Depends(obtener_usuario_actual)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
     return usuario
 
-# nuevas rutas admin
+# nuevas rutas admin REGISTRO
 @app.post("/admin/usuarios", response_model=UsuarioSalida)
 async def crear_usuario_admin(
     usuario: CrearUsuario,
@@ -592,19 +595,22 @@ def eliminar_usuario_admin(
     db: Session = Depends(obtener_db),
 ):
     try:
+        if usuario_id == admin.id:
+            raise HTTPException(status_code=403, detail="No puedes eliminar tu propio usuario")
+        
         db_usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
         if not db_usuario:
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
-        
+
         db_usuario.soft_delete = True
         db.commit()
-        print(Fore.GREEN + f"Usuario eliminado exitosamente por admin: {db_usuario.email}" + Style.RESET_ALL)
+        logger.info(f"Usuario eliminado exitosamente por admin: {db_usuario.email}")
         return {"detail": "Usuario eliminado exitosamente"}
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al eliminar usuario: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al eliminar usuario: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
-
+    
 @app.post("/registro", response_model=UsuarioSalida)
 async def registrar_usuario(
     nombre: str = Form(...),
@@ -704,16 +710,12 @@ async def renovar_token(
         logger.info("Intento de renovación de token")
         logger.debug(f"Token de actualización recibido: {token_actualizacion}")
         
-        if not token_actualizacion or not isinstance(token_actualizacion, str):
-            logger.error(f"Token de actualización inválido: {token_actualizacion}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token de actualización inválido")
-        
         try:
             payload = jwt.decode(token_actualizacion, CLAVE_SECRETA, algorithms=[ALGORITMO])
             logger.debug(f"Payload decodificado: {payload}")
         except jwt.JWTError as e:
             logger.error(f"Error al decodificar el token: {str(e)}")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Token inválido: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
         
         email: str = payload.get("sub")
         exp: float = payload.get("exp")
@@ -751,25 +753,9 @@ async def renovar_token(
         )
     except Exception as e:
         logger.exception(f"Error inesperado durante la renovación del token: {str(e)}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error interno del servidor: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
-@app.get("/pagina-principal", response_model=ResumenPrincipal)
-def obtener_resumen_principal(
-    usuario: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db),
-):
-    total_protestas = db.query(Protesta).filter(Protesta.soft_delete == False).count()
-    protestas_recientes = (
-        db.query(Protesta)
-        .filter(Protesta.soft_delete == False)
-        .order_by(Protesta.fecha_creacion.desc())
-        .limit(5)
-        .all()
-    )
-
-    return ResumenPrincipal(
-        total_protestas=total_protestas, protestas_recientes=protestas_recientes
-    )
+from fastapi import HTTPException, status
 
 @app.post("/naturalezas", response_model=NaturalezaSalida)
 def crear_naturaleza(
@@ -778,44 +764,40 @@ def crear_naturaleza(
     db: Session = Depends(obtener_db),
 ):
     try:
+        # Crear la nueva instancia de Naturaleza
         db_naturaleza = Naturaleza(
             **naturaleza.model_dump(), creado_por=usuario.id
         )
         db.add(db_naturaleza)
         db.commit()
         db.refresh(db_naturaleza)
-        print(
-            Fore.GREEN
-            + f"Naturaleza creada exitosamente: {naturaleza.nombre}"
-            + Style.RESET_ALL
-        )
+        
+        # Log exitoso
+        logger.info(f"Naturaleza creada exitosamente: {naturaleza.nombre}")
+        
         return NaturalezaSalida.from_orm(db_naturaleza)
+    
     except IntegrityError as e:
         db.rollback()
         if isinstance(e.orig, psycopg2.errors.UniqueViolation):
             if "naturalezas_nombre_key" in str(e.orig):
-                print(
-                    Fore.YELLOW
-                    + f"Intento de crear naturaleza con nombre duplicado: {naturaleza.nombre}"
-                    + Style.RESET_ALL
-                )
+                logger.warning(f"Intento de crear naturaleza con nombre duplicado: {naturaleza.nombre}")
                 raise HTTPException(
-                    status_code=400,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Ya existe una naturaleza con el nombre '{naturaleza.nombre}'",
                 )
-        print(
-            Fore.RED
-            + f"Error de integridad al crear naturaleza: {str(e)}"
-            + Style.RESET_ALL
-        )
+        logger.error(f"Error de integridad al crear naturaleza: {str(e)}")
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Error al crear la naturaleza. Por favor, intente de nuevo.",
         )
+    
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al crear naturaleza: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        logger.error(f"Error al crear naturaleza: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
+
+from fastapi import HTTPException, status
 
 @app.post("/cabecillas", response_model=CabecillaSalida)
 async def crear_cabecilla(
@@ -853,38 +835,33 @@ async def crear_cabecilla(
                 db_cabecilla.foto = relative_path
             else:
                 db.rollback()
-                raise HTTPException(status_code=500, detail="Error al guardar la imagen")
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al guardar la imagen")
 
         db.commit()
         db.refresh(db_cabecilla)
-        return db_cabecilla
+        
+        # Devolver la respuesta en el formato correcto
+        return CabecillaSalida.model_validate(db_cabecilla)
 
     except IntegrityError as e:
         db.rollback()
         if isinstance(e.orig, psycopg2.errors.UniqueViolation):
             if "cabecillas_cedula_key" in str(e.orig):
-                print(
-                    Fore.YELLOW
-                    + f"Intento de crear cabecilla con cédula duplicada: {cedula}"
-                    + Style.RESET_ALL
-                )
+                logger.warning(f"Intento de crear cabecilla con cédula duplicada: {cedula}")
                 raise HTTPException(
-                    status_code=400,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Ya existe un cabecilla con la cédula '{cedula}'",
                 )
-        print(
-            Fore.RED
-            + f"Error de integridad al crear cabecilla: {str(e)}"
-            + Style.RESET_ALL
-        )
+        logger.error(f"Error de integridad al crear cabecilla: {str(e)}")
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Error al crear el cabecilla. Por favor, intente de nuevo.",
         )
+    
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al crear cabecilla: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        logger.error(f"Error al crear cabecilla: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.post("/protestas/completa", response_model=ProtestaSalida)
 def crear_protesta_completa(
@@ -892,46 +869,62 @@ def crear_protesta_completa(
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    # Crear nueva naturaleza si se proporciona
-    if protesta.nueva_naturaleza:
-        nueva_naturaleza = Naturaleza(
-            **protesta.nueva_naturaleza.model_dump(), creado_por=usuario.id
+    try:
+        # Crear nueva naturaleza si se proporciona
+        if protesta.nueva_naturaleza:
+            nueva_naturaleza = Naturaleza(
+                **protesta.nueva_naturaleza.model_dump(), creado_por=usuario.id
+            )
+            db.add(nueva_naturaleza)
+            db.flush()
+            naturaleza_id = nueva_naturaleza.id
+        else:
+            naturaleza_id = protesta.naturaleza_id
+
+        # Crear nuevos cabecillas
+        nuevos_cabecillas_ids = []
+        for nuevo_cabecilla in protesta.nuevos_cabecillas:
+            db_cabecilla = Cabecilla(
+                **nuevo_cabecilla.model_dump(), creado_por=usuario.id
+            )
+            db.add(db_cabecilla)
+            db.flush()
+            nuevos_cabecillas_ids.append(db_cabecilla.id)
+
+        # Crear la protesta
+        db_protesta = Protesta(
+            nombre=protesta.nombre,
+            naturaleza_id=naturaleza_id,
+            provincia_id=protesta.provincia_id,
+            resumen=protesta.resumen,
+            fecha_evento=protesta.fecha_evento,
+            creado_por=usuario.id,
         )
-        db.add(nueva_naturaleza)
+        db.add(db_protesta)
         db.flush()
-        naturaleza_id = nueva_naturaleza.id
-    else:
-        naturaleza_id = protesta.naturaleza_id
 
-    # Crear nuevos cabecillas
-    nuevos_cabecillas_ids = []
-    for nuevo_cabecilla in protesta.nuevos_cabecillas:
-        db_cabecilla = Cabecilla(
-            **nuevo_cabecilla.model_dump(), creado_por=usuario.id
-        )
-        db.add(db_cabecilla)
-        db.flush()
-        nuevos_cabecillas_ids.append(db_cabecilla.id)
+        # Asociar cabecillas existentes y nuevos
+        for cabecilla_id in protesta.cabecillas + nuevos_cabecillas_ids:
+            cabecilla = db.query(Cabecilla).get(cabecilla_id)
+            if cabecilla:
+                db_protesta.cabecillas.append(cabecilla)
+            else:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Cabecilla con ID {cabecilla_id} no encontrado")
 
-    # Crear la protesta
-    db_protesta = Protesta(
-        nombre=protesta.nombre,
-        naturaleza_id=naturaleza_id,
-        provincia_id=protesta.provincia_id,
-        resumen=protesta.resumen,
-        fecha_evento=protesta.fecha_evento,
-        creado_por=usuario.id,
-    )
-    db.add(db_protesta)
-    db.flush()
+        db.commit()
+        db.refresh(db_protesta)
 
-    # Asociar cabecillas existentes y nuevos
-    for cabecilla_id in protesta.cabecillas + nuevos_cabecillas_ids:
-        db_protesta.cabecillas.append(db.query(Cabecilla).get(cabecilla_id))
+        return ProtestaSalida.model_validate(db_protesta)
 
-    db.commit()
-    db.refresh(db_protesta)
-    return db_protesta
+    except IntegrityError as e:
+        db.rollback()
+        logger.error(f"Error de integridad al crear la protesta: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Error al crear la protesta. Por favor, intente de nuevo.")
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error al crear protesta: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.post("/protestas", response_model=ProtestaSalida)
 def crear_protesta(
@@ -945,18 +938,20 @@ def crear_protesta(
         provincia = db.query(Provincia).get(protesta.provincia_id)
         if not naturaleza or not provincia:
             raise HTTPException(
-                status_code=400, detail="Naturaleza o provincia no válida"
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="Naturaleza o provincia no válida"
             )
 
         # Validar que los cabecillas existen
-        cabecillas = (
-            db.query(Cabecilla).filter(Cabecilla.id.in_(protesta.cabecillas)).all()
-        )
-        if len(cabecillas) != len(protesta.cabecillas):
+        cabecillas_ids = protesta.cabecillas
+        cabecillas = db.query(Cabecilla).filter(Cabecilla.id.in_(cabecillas_ids)).all()
+        if len(cabecillas) != len(cabecillas_ids):
             raise HTTPException(
-                status_code=400, detail="Uno o más cabecillas no son válidos"
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="Uno o más cabecillas no son válidos"
             )
 
+        # Crear la protesta
         db_protesta = Protesta(
             nombre=protesta.nombre,
             naturaleza_id=protesta.naturaleza_id,
@@ -966,26 +961,34 @@ def crear_protesta(
             creado_por=usuario.id,
         )
         db.add(db_protesta)
-        db.flush()
+        db.flush()  # Para obtener el ID de la protesta
 
-        for cabecilla_id in protesta.cabecillas:
-            db_protesta.cabecillas.append(db.query(Cabecilla).get(cabecilla_id))
+        # Asociar cabecillas a la protesta
+        for cabecilla_id in cabecillas_ids:
+            cabecilla = db.query(Cabecilla).get(cabecilla_id)
+            if cabecilla:
+                db_protesta.cabecillas.append(cabecilla)
 
         db.commit()
         db.refresh(db_protesta)
-        print(
-            Fore.GREEN
-            + f"Protesta creada exitosamente: {protesta.nombre}"
-            + Style.RESET_ALL
-        )
-        return db_protesta
+        logger.info(f"Protesta creada exitosamente: {protesta.nombre}")
+        return ProtestaSalida.model_validate(db_protesta)
+
     except HTTPException as he:
         raise he
+    except IntegrityError as e:
+        db.rollback()
+        logger.error(f"Error de integridad al crear la protesta: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Error de integridad en la base de datos. Por favor, intente de nuevo."
+        )
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al crear protesta: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al crear protesta: {str(e)}")
         raise HTTPException(
-            status_code=500, detail=f"Error interno del servidor: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {str(e)}"
         )
 
 @app.get("/protestas", response_model=PaginatedResponse[ProtestaSalida])
@@ -1030,8 +1033,8 @@ def obtener_protesta(
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
+    # Convertir el string a UUID
     try:
-        # Convertir el string a UUID
         protesta_uuid = uuid.UUID(protesta_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="ID de protesta inválido")
@@ -1051,35 +1054,14 @@ def obtener_protesta(
         if not protesta:
             raise HTTPException(status_code=404, detail="Protesta no encontrada")
 
-        # Convertir fechas a objetos date si son datetime
-        if isinstance(protesta.fecha_evento, datetime):
-            protesta.fecha_evento = protesta.fecha_evento.date()
-        if isinstance(protesta.fecha_creacion, datetime):
-            protesta.fecha_creacion = protesta.fecha_creacion.date()
-
-        # Crear el diccionario de la protesta
-        protesta_dict = {
-            "id": protesta.id,
-            "nombre": protesta.nombre,
-            "naturaleza_id": protesta.naturaleza_id,
-            "provincia_id": protesta.provincia_id,
-            "resumen": protesta.resumen,
-            "fecha_evento": protesta.fecha_evento,
-            "creado_por": protesta.creado_por,
-            "fecha_creacion": protesta.fecha_creacion,
-            "soft_delete": protesta.soft_delete,
-            "cabecillas": [
-                CabecillaSalida.model_validate(c) for c in protesta.cabecillas
-            ],
-        }
-
-        return ProtestaSalida(**protesta_dict)
+        return ProtestaSalida.model_validate(protesta)
+    
     except Exception as e:
-        print(f"Error al obtener protesta: {str(e)}")
+        logger.error(f"Error al obtener protesta: {str(e)}")
         raise HTTPException(
-            status_code=500, detail=f"Error interno del servidor: {str(e)}"
+            status_code=500, detail="Error interno del servidor"
         )
-
+        
 @app.put("/protestas/{protesta_id}", response_model=ProtestaSalida)
 def actualizar_protesta(
     protesta_id: uuid.UUID,
@@ -1088,11 +1070,12 @@ def actualizar_protesta(
     db: Session = Depends(obtener_db),
 ):
     try:
+        # Buscar la protesta existente
         db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id).first()
         if not db_protesta:
             raise HTTPException(status_code=404, detail="Protesta no encontrada")
 
-        # Verificar si el usuario es el creador de la protesta
+        # Verificar permisos del usuario
         if db_protesta.creado_por != usuario.id:
             raise HTTPException(status_code=403, detail="No tienes permiso para editar esta protesta")
 
@@ -1105,20 +1088,26 @@ def actualizar_protesta(
         db_protesta.naturaleza = db.query(Naturaleza).get(protesta.naturaleza_id)
         db_protesta.provincia = db.query(Provincia).get(protesta.provincia_id)
 
-        # Actualizar cabecillas
+        # Actualizar cabecillas (evitar el uso de `get` para manejar mejor la excepción)
         db_protesta.cabecillas = []
         for cabecilla_id in protesta.cabecillas:
-            db_cabecilla = db.query(Cabecilla).get(cabecilla_id)
+            db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id).first()
             if db_cabecilla:
                 db_protesta.cabecillas.append(db_cabecilla)
+            else:
+                raise HTTPException(status_code=400, detail=f"Cabecilla con ID {cabecilla_id} no encontrado")
 
         db.commit()
         db.refresh(db_protesta)
         print(Fore.GREEN + f"Protesta actualizada exitosamente: {db_protesta.nombre}" + Style.RESET_ALL)
-        return db_protesta
+        return ProtestaSalida.model_validate(db_protesta)
+    
+    except HTTPException as he:
+        # Relanzar las excepciones HTTP sin manejar
+        raise he
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al actualizar protesta: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al actualizar protesta: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.delete("/protestas/{protesta_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1131,16 +1120,23 @@ def eliminar_protesta(
         db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id).first()
         if not db_protesta:
             raise HTTPException(status_code=404, detail="Protesta no encontrada")
-        
+
         db_protesta.soft_delete = True
         db.commit()
-        print(Fore.GREEN + f"Protesta eliminada exitosamente por admin: {db_protesta.nombre}" + Style.RESET_ALL)
+
+        logger.info(
+            f"Protesta '{db_protesta.nombre}' eliminada exitosamente por admin: {admin_actual.nombre} {admin_actual.apellidos}"
+        )
+
         return {"detail": "Protesta eliminada exitosamente"}
+    
     except HTTPException as he:
+        # Relanzar excepciones HTTP
         raise he
     except Exception as e:
+        # Manejar otros errores
         db.rollback()
-        print(Fore.RED + f"Error al eliminar protesta: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al eliminar protesta: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.get("/provincias", response_model=List[ProvinciaSalida])
@@ -1204,15 +1200,11 @@ def obtener_naturalezas(
             "pages": (total + page_size - 1) // page_size
         }
         
-        print(
-            Fore.GREEN
-            + f"Naturalezas obtenidas exitosamente. Total: {total}, Página: {page}"
-            + Style.RESET_ALL
-        )
+        logger.info(f"Naturalezas obtenidas exitosamente. Total: {total}, Página: {page}")
         return result
     except Exception as e:
-        print(Fore.RED + f"Error al obtener naturalezas: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+        logger.error(f"Error al obtener naturalezas: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.get("/naturalezas/{naturaleza_id}", response_model=NaturalezaSalida)
 def obtener_naturaleza(
@@ -1227,22 +1219,16 @@ def obtener_naturaleza(
             .first()
         )
         if not naturaleza:
-            print(
-                Fore.YELLOW
-                + f"Naturaleza no encontrada: {naturaleza_id}"
-                + Style.RESET_ALL
-            )
+            logger.warning(f"Naturaleza no encontrada: {naturaleza_id}")
             raise HTTPException(status_code=404, detail="Naturaleza no encontrada")
-        print(
-            Fore.GREEN
-            + f"Naturaleza obtenida exitosamente: {naturaleza.nombre}"
-            + Style.RESET_ALL
-        )
+        
+        logger.info(f"Naturaleza obtenida exitosamente: {naturaleza.nombre}")
         return NaturalezaSalida.from_orm(naturaleza)
     except HTTPException as he:
+        # Relanzar excepciones HTTP
         raise he
     except Exception as e:
-        print(Fore.RED + f"Error al obtener naturaleza: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al obtener naturaleza: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.put("/naturalezas/{naturaleza_id}", response_model=NaturalezaSalida)
@@ -1253,73 +1239,85 @@ def actualizar_naturaleza(
     db: Session = Depends(obtener_db),
 ):
     try:
-        db_naturaleza = (
-            db.query(Naturaleza)
-            .filter(
-                Naturaleza.id == naturaleza_id,
-                Naturaleza.creado_por == usuario.id,
-            )
-            .first()
-        )
+        # Verificar si el usuario es admin
+        if not es_admin(usuario):
+            # Verificar si la naturaleza está asociada a una protesta
+            asociada_a_protesta = db.query(Protesta).filter(
+                Protesta.naturaleza_id == naturaleza_id
+            ).count() > 0
+            
+            if asociada_a_protesta:
+                logger.warning(f"El usuario {usuario.id} no tiene permiso para editar la naturaleza {naturaleza_id} porque está asociada a una protesta.")
+                raise HTTPException(
+                    status_code=403,
+                    detail="No tienes permiso para editar esta naturaleza. Está asociada a una protesta."
+                )
+        
+        db_naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id).first()
         if not db_naturaleza:
-            print(
-                Fore.YELLOW
-                + f"Naturaleza no encontrada o sin permisos: {naturaleza_id}"
-                + Style.RESET_ALL
-            )
+            logger.warning(f"Naturaleza no encontrada: {naturaleza_id}")
             raise HTTPException(
                 status_code=404,
-                detail="Naturaleza no encontrada o no tienes permiso para editarla",
+                detail="Naturaleza no encontrada",
             )
 
+        # Actualizar campos
         for key, value in naturaleza.model_dump().items():
             setattr(db_naturaleza, key, value)
 
         db.commit()
         db.refresh(db_naturaleza)
-        print(
-            Fore.GREEN
-            + f"Naturaleza actualizada exitosamente: {db_naturaleza.nombre}"
-            + Style.RESET_ALL
-        )
+        logger.info(f"Naturaleza actualizada exitosamente: {db_naturaleza.nombre}")
         return NaturalezaSalida.from_orm(db_naturaleza)
+
     except HTTPException as he:
         raise he
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al actualizar naturaleza: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al actualizar naturaleza: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.delete("/naturalezas/{naturaleza_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_naturaleza(
     naturaleza_id: uuid.UUID,
-    admin: Usuario = Depends(verificar_admin),  # Cambiado a verificar_admin
+    admin_actual: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
     try:
+        # Verificar si la naturaleza existe
         db_naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id).first()
         if not db_naturaleza:
+            logger.warning(f"Naturaleza no encontrada: {naturaleza_id}")
             raise HTTPException(status_code=404, detail="Naturaleza no encontrada")
 
-        # Verificar si la naturaleza está asociada a alguna protesta
-        protestas_asociadas = db.query(Protesta).filter(Protesta.naturaleza_id == naturaleza_id).first()
+        # Verificar si la naturaleza está asociada a alguna protesta no eliminada
+        protestas_asociadas = db.query(Protesta).filter(
+            Protesta.naturaleza_id == naturaleza_id,
+            Protesta.soft_delete == False  # Solo considerar protestas no eliminadas
+        ).first()
+
         if protestas_asociadas:
+            logger.warning(f"Naturaleza {naturaleza_id} asociada a protestas activas.")
             raise HTTPException(
                 status_code=400,
                 detail="No se puede eliminar una naturaleza asociada a protestas. Elimine o edite las protestas primero."
             )
 
+        # Realizar soft delete
         db_naturaleza.soft_delete = True
         db.commit()
-        print(Fore.GREEN + f"Naturaleza eliminada exitosamente por admin: {db_naturaleza.nombre}" + Style.RESET_ALL)
+
+        logger.info(f"Naturaleza {db_naturaleza.nombre} eliminada exitosamente por admin: {admin_actual.nombre} {admin_actual.apellidos}")
+        
         return {"detail": "Naturaleza eliminada exitosamente"}
+    
     except HTTPException as he:
+        # Relanzar excepciones HTTP
         raise he
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al eliminar naturaleza: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al eliminar naturaleza: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
-
 
 @app.get("/cabecillas", response_model=PaginatedResponse[CabecillaSalida])
 def obtener_cabecillas(
@@ -1332,6 +1330,7 @@ def obtener_cabecillas(
     db: Session = Depends(obtener_db),
 ):
     try:
+        # Construir la consulta con filtros
         query = db.query(Cabecilla).filter(Cabecilla.soft_delete == False)
         
         if nombre:
@@ -1341,25 +1340,25 @@ def obtener_cabecillas(
         if cedula:
             query = query.filter(Cabecilla.cedula.ilike(f"%{cedula}%"))
         
+        # Contar el total de registros
         total = query.count()
+        
+        # Obtener los resultados paginados
         cabecillas = query.offset((page - 1) * page_size).limit(page_size).all()
+        cabecillas_salida = [CabecillaSalida.model_validate(c.__dict__) for c in cabecillas]
         
         result = {
-            "items": cabecillas,
+            "items": cabecillas_salida,
             "total": total,
             "page": page,
             "page_size": page_size,
             "pages": (total + page_size - 1) // page_size
         }
         
-        print(
-            Fore.GREEN
-            + f"Cabecillas obtenidos exitosamente. Total: {total}, Página: {page}"
-            + Style.RESET_ALL
-        )
+        logger.info(f"Cabecillas obtenidos exitosamente. Total: {total}, Página: {page}")
         return result
     except Exception as e:
-        print(Fore.RED + f"Error al obtener cabecillas: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al obtener cabecillas: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # NUEVO ENDPOINT
@@ -1370,9 +1369,10 @@ def obtener_todos_los_cabecillas(
 ):
     try:
         cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).all()
-        return [CabecillaSalida.model_validate(c) for c in cabecillas]
+        cabecillas_salida = [Cabecilla.model_validate(c.__dict__) for c in cabecillas]
+        return cabecillas_salida
     except Exception as e:
-        print(Fore.RED + f"Error al obtener todos los cabecillas: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al obtener todos los cabecillas: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.get("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
@@ -1388,24 +1388,16 @@ def obtener_cabecilla(
             .first()
         )
         if not cabecilla:
-            print(
-                Fore.YELLOW
-                + f"Cabecilla no encontrado: {cabecilla_id}"
-                + Style.RESET_ALL
-            )
+            logger.warning(f"Cabecilla no encontrado: {cabecilla_id}")
             raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
-        print(
-            Fore.GREEN
-            + f"Cabecilla obtenido exitosamente: {cabecilla.nombre} {cabecilla.apellido}"
-            + Style.RESET_ALL
-        )
-        return cabecilla
+        logger.info(f"Cabecilla obtenido exitosamente: {cabecilla.nombre} {cabecilla.apellido}")
+        return CabecillaSalida.model_validate(cabecilla)
     except HTTPException as he:
         raise he
     except Exception as e:
-        print(Fore.RED + f"Error al obtener cabecilla: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al obtener cabecilla: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
-
+    
 @app.put("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
 def actualizar_cabecilla(
     cabecilla_id: uuid.UUID,
@@ -1414,63 +1406,63 @@ def actualizar_cabecilla(
     db: Session = Depends(obtener_db),
 ):
     try:
+        # Buscar la cabecilla en la base de datos
         db_cabecilla = (
             db.query(Cabecilla)
             .filter(
-                Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id
+                Cabecilla.id == cabecilla_id, 
+                Cabecilla.creado_por == usuario.id,
+                Cabecilla.soft_delete == False
             )
             .first()
         )
         if not db_cabecilla:
-            print(
-                Fore.YELLOW
-                + f"Cabecilla no encontrado o sin permisos: {cabecilla_id}"
-                + Style.RESET_ALL
-            )
+            logger.warning(f"Cabecilla no encontrada o sin permisos: {cabecilla_id}")
             raise HTTPException(
                 status_code=404,
-                detail="Cabecilla no encontrado o no tienes permiso para editarlo",
+                detail="Cabecilla no encontrada o no tienes permiso para editarlo",
             )
 
-        for key, value in cabecilla.model_dump().items():
+        # Actualizar los atributos de la cabecilla
+        for key, value in cabecilla.dict().items():
             setattr(db_cabecilla, key, value)
 
         db.commit()
         db.refresh(db_cabecilla)
-        print(
-            Fore.GREEN
-            + f"Cabecilla actualizado exitosamente: {db_cabecilla.nombre} {db_cabecilla.apellido}"
-            + Style.RESET_ALL
-        )
-        return db_cabecilla
+        logger.info(f"Cabecilla actualizado exitosamente: {db_cabecilla.nombre} {db_cabecilla.apellido}")
+        return CabecillaSalida.model_validate(db_cabecilla)
     except HTTPException as he:
         raise he
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al actualizar cabecilla: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al actualizar cabecilla: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.delete("/cabecillas/{cabecilla_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_cabecilla(
     cabecilla_id: uuid.UUID,
-    usuario: Usuario = Depends(verificar_admin),  # Cambiado a verificar_admin
+    usuario: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
     try:
         db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id).first()
         if not db_cabecilla:
+            logger.warning(f"Cabecilla no encontrado: {cabecilla_id}")
             raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
         
         # Eliminar asociaciones con protestas
-        db.query(ProtestaCabecilla).filter(ProtestaCabecilla.cabecilla_id == cabecilla_id).delete()
-
+        db.query(ProtestaCabecilla).filter(ProtestaCabecilla.cabecilla_id == cabecilla_id).delete(synchronize_session=False)
+        
+        # Marcamos la cabecilla como eliminada
         db_cabecilla.soft_delete = True
         db.commit()
-        print(Fore.GREEN + f"Cabecilla eliminado exitosamente por admin: {db_cabecilla.nombre} {db_cabecilla.apellido}" + Style.RESET_ALL)
+        logger.info(f"Cabecilla {db_cabecilla.nombre} {db_cabecilla.apellido} eliminado exitosamente por admin: {usuario.nombre} {usuario.apellidos}")
         return {"detail": "Cabecilla eliminado exitosamente"}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al eliminar cabecilla: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al eliminar cabecilla: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 def validate_image(file: UploadFile):
