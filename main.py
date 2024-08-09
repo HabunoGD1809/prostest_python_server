@@ -1492,6 +1492,8 @@ UPLOAD_DIRECTORY = os.path.join(STATIC_FILES_DIR, UPLOAD_DIR)
 MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE"))
 ALLOWED_IMAGE_TYPES = os.getenv("ALLOWED_IMAGE_TYPES").split(',')
 
+app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
+
 # Asegurarse de que el directorio de uploads exista
 os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
 
