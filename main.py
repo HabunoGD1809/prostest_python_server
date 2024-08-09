@@ -8,7 +8,7 @@ import uuid
 import imghdr
 from signal import signal
 from datetime import date, datetime, timedelta, timezone
-from typing import Generic, List, Optional, TypeVar
+from typing import Generic, List, Optional, Tuple, TypeVar
 from contextlib import asynccontextmanager
 
 # Librerías de terceros
@@ -33,6 +33,8 @@ import bcrypt
 import uvicorn
 from colorama import init, Fore, Style
 from dotenv import load_dotenv
+from fastapi import HTTPException, status
+
 
 # Cargar variables de entorno
 load_dotenv()
@@ -201,38 +203,39 @@ class ProtestaCabecilla(Base):
     cabecilla_id = Column(GUID(), ForeignKey("api.cabecillas.id"), primary_key=True)
 
 # Modelos Pydantic
-class UsuarioSalida(BaseModel):
-    id: uuid.UUID
-    foto: Optional[str]
+
+# update down
+
+class UsuarioBase(BaseModel):
     nombre: str
     apellidos: str
     email: EmailStr
-    rol: str
-    fecha_creacion: datetime
-
-    class Config:
-        from_attributes = True
-
-class CrearUsuario(BaseModel):
-    foto: Optional[str] = None
-    nombre: str
-    apellidos: str
-    email: EmailStr
-    password: str
-    repetir_password: str
-    rol: Optional[str] = "usuario"
-
-    @field_validator("repetir_password")
-    def passwords_match(cls, v, info):
-        if "password" in info.data and v != info.data["password"]:
-            raise ValueError("Las contraseñas no coinciden")
-        return v
+    rol: str = Field(default="usuario")
 
     @field_validator("rol")
     def validate_rol(cls, v):
         if v not in ["usuario", "admin"]:
             raise ValueError("El rol debe ser 'usuario' o 'admin'")
         return v
+
+class UsuarioSalida(UsuarioBase):
+    id: uuid.UUID
+    fecha_creacion: datetime
+    foto: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class CrearUsuario(UsuarioBase):
+    password: str
+    repetir_password: str
+
+    @field_validator("repetir_password")
+    def passwords_match(cls, v, info):
+        if "password" in info.data and v != info.data["password"]:
+            raise ValueError("Las contraseñas no coinciden")
+        return v
+#update up
 class Token(BaseModel):
     token_acceso: str
     token_actualizacion: str
@@ -383,6 +386,7 @@ def obtener_hash_password(password: str) -> str:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Creacion y actualizacion de token
 def crear_token_acceso(datos: dict) -> str:
     a_codificar = datos.copy()
     expira = datetime.now(timezone.utc) + timedelta(minutes=MINUTOS_INACTIVIDAD_PERMITIDOS)  # 15 minutos de expiración
@@ -460,6 +464,66 @@ def paginar(query, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, 
         "page_size": page_size,
         "pages": (total + page_size - 1) // page_size,
     }
+    
+# Dependencia para crear usuario desde formulario
+async def crear_usuario_form(
+    nombre: str = Form(...),
+    apellidos: str = Form(...),
+    email: EmailStr = Form(...),
+    password: str = Form(...),
+    repetir_password: str = Form(...),
+    rol: str = Form("usuario"),
+    foto: Optional[UploadFile] = File(None)
+):
+    return CrearUsuario(
+        nombre=nombre,
+        apellidos=apellidos,
+        email=email,
+        password=password,
+        repetir_password=repetir_password,
+        rol=rol
+    ), foto
+
+# Función común para crear usuarios
+async def crear_usuario(usuario: CrearUsuario, foto: Optional[UploadFile], db: Session, is_admin_creation: bool = False):
+    try:
+        hash_password = obtener_hash_password(usuario.password)
+        foto_path = None
+        if foto:
+            validate_image(foto)
+            file_name = f"usuario_{uuid.uuid4()}_{foto.filename}"
+            file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
+            await save_upload_file(foto, file_path)
+            foto_path = os.path.join(UPLOAD_DIR, file_name)
+
+        db_usuario = Usuario(
+            foto=foto_path,
+            nombre=usuario.nombre,
+            apellidos=usuario.apellidos,
+            email=usuario.email,
+            password=hash_password,
+            rol=usuario.rol if is_admin_creation else "usuario"
+        )
+        db.add(db_usuario)
+        db.commit()
+        db.refresh(db_usuario)
+        print(f"Usuario {'creado por admin' if is_admin_creation else 'registrado'} exitosamente: {usuario.email}")
+        return db_usuario
+    except IntegrityError as e:
+        db.rollback()
+        if "usuarios_email_key" in str(e.orig):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Ya existe un usuario con el email '{usuario.email}'"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Error al crear el usuario. Por favor, intente de nuevo."
+        )
+    except Exception as e:
+        db.rollback()
+        print(f"Error al {'crear' if is_admin_creation else 'registrar'} usuario: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 # Middleware
 @app.middleware("http")
@@ -476,14 +540,25 @@ async def actualizar_token_actividad(request: Request, call_next):
             pass
     return response
 
-UPLOAD_DIRECTORY = os.getenv("UPLOAD_DIRECTORY")
-MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE"))
-ALLOWED_IMAGE_TYPES = os.getenv("ALLOWED_IMAGE_TYPES").split(',')
-
-if not os.path.exists(UPLOAD_DIRECTORY):
-    os.makedirs(UPLOAD_DIRECTORY)
-
 # Rutas de la API
+@app.get("/pagina-principal", response_model=ResumenPrincipal)
+def obtener_resumen_principal(
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
+):
+    total_protestas = db.query(Protesta).filter(Protesta.soft_delete == False).count()
+    protestas_recientes = (
+        db.query(Protesta)
+        .filter(Protesta.soft_delete == False)
+        .order_by(Protesta.fecha_creacion.desc())
+        .limit(5)
+        .all()
+    )
+
+    return ResumenPrincipal(
+        total_protestas=total_protestas, protestas_recientes=protestas_recientes
+    )
+
 @app.put("/usuarios/{usuario_id}/rol", response_model=UsuarioSalida)
 def cambiar_rol_usuario(
     usuario_id: uuid.UUID,
@@ -494,38 +569,32 @@ def cambiar_rol_usuario(
     try:
         usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
         if not usuario:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
         
         if usuario_actual.rol != 'admin':
-            raise HTTPException(status_code=403, detail="Solo los administradores pueden cambiar roles")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo los administradores pueden cambiar roles")
         
-        # Verificar si se está intentando cambiar el rol del último administrador
         if usuario.rol == 'admin' and nuevo_rol == 'usuario':
             admin_count = db.query(Usuario).filter(Usuario.rol == 'admin', Usuario.soft_delete == False).count()
             if admin_count == 1:
-                raise HTTPException(status_code=422, detail="No se puede cambiar el rol del último administrador")
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No se puede cambiar el rol del último administrador")
 
-        # Verificar si el usuario actual está intentando cambiar su propio rol
-        if usuario.id == usuario_actual.id:
-            if nuevo_rol != usuario_actual.rol:
-                raise HTTPException(status_code=403, detail="No puedes cambiar tu propio rol")
+        if usuario.id == usuario_actual.id and nuevo_rol != usuario_actual.rol:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puedes cambiar tu propio rol")
 
-        # Verificar si el rol ya es el que se está intentando asignar
-        if usuario.rol == nuevo_rol:
-            return usuario  # Retornar el usuario sin cambios si el rol es el mismo
-
-        # Permitir cambiar el rol
-        usuario.rol = nuevo_rol
-        db.commit()
-        db.refresh(usuario)
-        print(Fore.GREEN + f"Rol de usuario actualizado exitosamente: {usuario.email} - Nuevo rol: {nuevo_rol}" + Style.RESET_ALL)
+        if usuario.rol != nuevo_rol:
+            usuario.rol = nuevo_rol
+            db.commit()
+            db.refresh(usuario)
+            logger.info(f"{usuario_actual.nombre} {usuario_actual.apellidos} actualizo exitosamente el Rol del usuario: {usuario.email} - Nuevo rol: {nuevo_rol}")
+        
         return usuario
     except HTTPException as he:
         raise he
     except Exception as e:
         db.rollback()
-        print(Fore.RED + f"Error al cambiar rol de usuario: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error al cambiar rol de usuario: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 @app.get("/usuarios", response_model=List[UsuarioSalida])
 def listar_usuarios(
@@ -537,7 +606,7 @@ def listar_usuarios(
         return usuarios
     except Exception as e:
         print(Fore.RED + f"Error al listar usuarios: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
     
 @app.get("/usuarios/me", response_model=UsuarioSalida)
 async def obtener_usuario_actual_ruta(usuario: Usuario = Depends(obtener_usuario_actual)):
@@ -551,42 +620,20 @@ def verificar_autenticacion(usuario: Usuario = Depends(obtener_usuario_actual)):
 # nuevas rutas admin REGISTRO
 @app.post("/admin/usuarios", response_model=UsuarioSalida)
 async def crear_usuario_admin(
-    usuario: CrearUsuario,
+    usuario_data: Tuple[CrearUsuario, Optional[UploadFile]] = Depends(crear_usuario_form),
     admin: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db)
 ):
+    usuario, foto = usuario_data
     try:
-        hash_password = obtener_hash_password(usuario.password)
-        foto_path = None
-        if usuario.foto:
-            validate_image(usuario.foto)
-            file_name = f"usuario_{uuid.uuid4()}_{usuario.foto.filename}"
-            file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
-            await save_upload_file(usuario.foto, file_path)
-            foto_path = file_path
-
-        db_usuario = Usuario(
-            foto=foto_path,
-            nombre=usuario.nombre,
-            apellidos=usuario.apellidos,
-            email=usuario.email,
-            password=hash_password,
-            rol=usuario.rol
-        )
-        db.add(db_usuario)
-        db.commit()
-        db.refresh(db_usuario)
-        print(Fore.GREEN + f"Usuario creado exitosamente por admin: {usuario.email}" + Style.RESET_ALL)
-        return db_usuario
-    except IntegrityError as e:
-        db.rollback()
-        if "usuarios_email_key" in str(e.orig):
-            raise HTTPException(status_code=400, detail=f"Ya existe un usuario con el email '{usuario.email}'")
-        raise HTTPException(status_code=400, detail="Error al crear el usuario")
+        db_usuario = await crear_usuario(usuario, foto, db, is_admin_creation=True)
+        logger.info(f"Usuario creado por admin exitosamente: {usuario.email}")
+        return UsuarioSalida.model_validate(db_usuario)
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        db.rollback()
-        print(Fore.RED + f"Error al crear usuario: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        logger.error(f"Error al crear usuario admin: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.delete("/admin/usuarios/{usuario_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_usuario_admin(
@@ -596,11 +643,11 @@ def eliminar_usuario_admin(
 ):
     try:
         if usuario_id == admin.id:
-            raise HTTPException(status_code=403, detail="No puedes eliminar tu propio usuario")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puedes eliminar tu propio usuario")
         
         db_usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
         if not db_usuario:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
         db_usuario.soft_delete = True
         db.commit()
@@ -608,73 +655,16 @@ def eliminar_usuario_admin(
         return {"detail": "Usuario eliminado exitosamente"}
     except Exception as e:
         db.rollback()
-        logger.error(f"Error al eliminar usuario: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        logger.info(f"Error al eliminar usuario: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
     
 @app.post("/registro", response_model=UsuarioSalida)
 async def registrar_usuario(
-    nombre: str = Form(...),
-    apellidos: str = Form(...),
-    email: EmailStr = Form(...),
-    password: str = Form(...),
-    repetir_password: str = Form(...),
-    foto: UploadFile = File(None),
+    usuario_data: Tuple[CrearUsuario, Optional[UploadFile]] = Depends(crear_usuario_form),
     db: Session = Depends(obtener_db),
 ):
-    if password != repetir_password:
-        raise HTTPException(status_code=400, detail="Las contraseñas no coinciden")
-
-    try:
-        hash_password = obtener_hash_password(password)
-        # Guardar la foto si se proporciona
-        foto_path = None
-        if foto:
-            validate_image(foto)
-            file_name = f"usuario_{uuid.uuid4()}_{foto.filename}"
-            file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
-            save_upload_file(foto, file_path)
-            foto_path = file_path
-
-        db_usuario = Usuario(
-            foto=foto_path,
-            nombre=nombre,
-            apellidos=apellidos,
-            email=email,
-            password=hash_password,
-        )
-        db.add(db_usuario)
-        db.commit()
-        db.refresh(db_usuario)
-        print(
-            Fore.GREEN + f"Usuario registrado exitosamente: {email}" + Style.RESET_ALL
-        )
-        return db_usuario
-    except IntegrityError as e:
-        db.rollback()
-        if isinstance(e.orig, psycopg2.errors.UniqueViolation):
-            if "usuarios_email_key" in str(e.orig):
-                print(
-                    Fore.YELLOW
-                    + f"Intento de registrar usuario con email duplicado: {email}"
-                    + Style.RESET_ALL
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Ya existe un usuario con el email '{email}'",
-                )
-        print(
-            Fore.RED
-            + f"Error de integridad al registrar usuario: {str(e)}"
-            + Style.RESET_ALL
-        )
-        raise HTTPException(
-            status_code=400,
-            detail="Error al registrar el usuario. Por favor, intente de nuevo.",
-        )
-    except Exception as e:
-        db.rollback()
-        print(Fore.RED + f"Error al registrar usuario: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+    usuario, foto = usuario_data
+    return await crear_usuario(usuario, foto, db)   
 
 @app.post("/token", response_model=Token)
 async def login_para_token_acceso(
@@ -755,8 +745,6 @@ async def renovar_token(
         logger.exception(f"Error inesperado durante la renovación del token: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
-from fastapi import HTTPException, status
-
 @app.post("/naturalezas", response_model=NaturalezaSalida)
 def crear_naturaleza(
     naturaleza: CrearNaturaleza,
@@ -773,7 +761,7 @@ def crear_naturaleza(
         db.refresh(db_naturaleza)
         
         # Log exitoso
-        logger.info(f"Naturaleza creada exitosamente: {naturaleza.nombre}")
+        logger.info(f"Naturaleza creada exitosamente: '{naturaleza.nombre}', por USUARIO: {usuario.nombre} {usuario.apellidos}")
         
         return NaturalezaSalida.from_orm(db_naturaleza)
     
@@ -796,8 +784,6 @@ def crear_naturaleza(
         db.rollback()
         logger.error(f"Error al crear naturaleza: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
-
-from fastapi import HTTPException, status
 
 @app.post("/cabecillas", response_model=CabecillaSalida)
 async def crear_cabecilla(
@@ -831,7 +817,7 @@ async def crear_cabecilla(
             relative_path = os.path.join(UPLOAD_DIR, file_name)
             file_path = os.path.join(STATIC_FILES_DIR, relative_path)
 
-            if save_upload_file(foto, file_path):
+            if await save_upload_file(foto, file_path):  
                 db_cabecilla.foto = relative_path
             else:
                 db.rollback()
@@ -1075,7 +1061,6 @@ def actualizar_protesta(
         if not db_protesta:
             raise HTTPException(status_code=404, detail="Protesta no encontrada")
 
-        # Verificar permisos del usuario
         if db_protesta.creado_por != usuario.id:
             raise HTTPException(status_code=403, detail="No tienes permiso para editar esta protesta")
 
@@ -1084,11 +1069,9 @@ def actualizar_protesta(
         db_protesta.resumen = protesta.resumen
         db_protesta.fecha_evento = protesta.fecha_evento
 
-        # Actualizar relaciones con objetos completos en lugar de IDs
         db_protesta.naturaleza = db.query(Naturaleza).get(protesta.naturaleza_id)
         db_protesta.provincia = db.query(Provincia).get(protesta.provincia_id)
 
-        # Actualizar cabecillas (evitar el uso de `get` para manejar mejor la excepción)
         db_protesta.cabecillas = []
         for cabecilla_id in protesta.cabecillas:
             db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id).first()
@@ -1267,7 +1250,7 @@ def actualizar_naturaleza(
 
         db.commit()
         db.refresh(db_naturaleza)
-        logger.info(f"Naturaleza actualizada exitosamente: {db_naturaleza.nombre}")
+        logger.info(f"Naturaleza '{db_naturaleza.nombre}' actualizada exitosamente por usuario: '{usuario.email}'")
         return NaturalezaSalida.from_orm(db_naturaleza)
 
     except HTTPException as he:
@@ -1465,6 +1448,39 @@ def eliminar_cabecilla(
         logger.error(f"Error al eliminar cabecilla: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
+@app.post("/usuarios/foto", response_model=UsuarioSalida)
+async def actualizar_foto_usuario(
+    foto: UploadFile = File(...),
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
+):
+    new_foto_url = await actualizar_foto(usuario.id, foto, db, "usuario", usuario.id)
+    usuario.foto = new_foto_url
+    return UsuarioSalida.model_validate(usuario)
+
+@app.post("/cabecillas/{cabecilla_id}/foto", response_model=CabecillaSalida)
+async def actualizar_foto_cabecilla(
+    cabecilla_id: uuid.UUID,
+    foto: UploadFile = File(...),
+    usuario: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db),
+):
+    new_foto_url = await actualizar_foto(cabecilla_id, foto, db, "cabecilla", usuario.id)
+    cabecilla = db.query(Cabecilla).get(cabecilla_id)
+    cabecilla.foto = new_foto_url
+    return CabecillaSalida.model_validate(cabecilla)
+
+# Configurar la ruta base para los archivos estáticos
+STATIC_FILES_DIR = "static"
+UPLOAD_DIR = os.getenv("UPLOAD_DIRECTORY")
+UPLOAD_DIRECTORY = os.path.join(STATIC_FILES_DIR, UPLOAD_DIR)
+MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE"))
+ALLOWED_IMAGE_TYPES = os.getenv("ALLOWED_IMAGE_TYPES").split(',')
+
+# Asegurarse de que el directorio de uploads exista
+os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
+
+# Funciones auxiliares
 def validate_image(file: UploadFile):
     # Verificar el tamaño del archivo
     file.file.seek(0, 2)
@@ -1486,64 +1502,55 @@ def validate_image(file: UploadFile):
             detail=f"Tipo de archivo no permitido. Solo se aceptan {', '.join(ALLOWED_IMAGE_TYPES)}.",
         )
 
-# Configurar la ruta base para los archivos estáticos
-STATIC_FILES_DIR = "static"
-UPLOAD_DIR = "uploads"
-app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
-
-# Función auxiliar para guardar el archivo
-async def save_upload_file(upload_file: UploadFile, destination: str) -> str:
-    try:
-        contents = await upload_file.read()
-        with open(destination, "wb") as buffer:
-            buffer.write(contents)
-        return destination
-    except Exception as e:
-        print(f"Error al guardar el archivo: {str(e)}")
-        return None
-
-@app.post("/usuarios/foto", response_model=UsuarioSalida)
-async def actualizar_foto_usuario(
-    foto: UploadFile = File(...),
-    usuario: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db),
-):
-    validate_image(foto)
-    file_name = f"{usuario.id}_{foto.filename}"
-    file_path = os.path.join(UPLOAD_DIRECTORY, file_name)
-    save_upload_file(foto, file_path)
-
-    usuario.foto = file_path
-    db.commit()
-    return usuario
-
-# Modificar la función para obtener la URL completa de la foto
 def get_full_image_url(foto_path: str) -> str:
     if foto_path:
         return f"/static/{foto_path}"
     return None
 
-@app.post("/cabecillas/{cabecilla_id}/foto", response_model=CabecillaSalida)
-async def actualizar_foto_cabecilla(
-    cabecilla_id: uuid.UUID,
-    foto: UploadFile = File(...),
-    usuario: Usuario = Depends(obtener_usuario_actual),
-    db: Session = Depends(obtener_db),
-):
-    cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id, Cabecilla.creado_por == usuario.id).first()
-    if not cabecilla:
-        raise HTTPException(status_code=404, detail="Cabecilla no encontrado o no tienes permiso para editarlo")
+async def save_upload_file(upload_file: UploadFile, destination: str) -> bool:
+    try:
+        contents = await upload_file.read()
+        with open(destination, "wb") as buffer:
+            buffer.write(contents)
+        return True
+    except Exception as e:
+        print(f"Error al guardar el archivo: {str(e)}")
+        return False
 
+def delete_old_file(file_path: str):
+    if file_path and os.path.exists(os.path.join(STATIC_FILES_DIR, file_path)):
+        os.remove(os.path.join(STATIC_FILES_DIR, file_path))
+
+async def actualizar_foto(
+    entity_id: uuid.UUID,
+    foto: UploadFile,
+    db: Session,
+    entity_type: str,
+    user_id: uuid.UUID
+) -> str:
     validate_image(foto)
     file_extension = os.path.splitext(foto.filename)[1]
-    file_name = f"cabecilla_{cabecilla_id}{file_extension}"
+    file_name = f"{entity_type}_{entity_id}{file_extension}"
     relative_path = os.path.join(UPLOAD_DIR, file_name)
     file_path = os.path.join(STATIC_FILES_DIR, relative_path)
     
-    if save_upload_file(foto, file_path):
-        cabecilla.foto = relative_path
+    if entity_type == "usuario":
+        entity = db.query(Usuario).filter(Usuario.id == entity_id).first()
+    elif entity_type == "cabecilla":
+        entity = db.query(Cabecilla).filter(Cabecilla.id == entity_id, Cabecilla.creado_por == user_id).first()
+    else:
+        raise ValueError("Tipo de entidad no válido")
+
+    if not entity:
+        raise HTTPException(status_code=404, detail=f"{entity_type.capitalize()} no encontrado o sin permisos")
+
+    delete_old_file(entity.foto)
+    
+    if await save_upload_file(foto, file_path):
+        entity.foto = relative_path
         db.commit()
-        return cabecilla
+        db.refresh(entity)
+        return get_full_image_url(relative_path)
     else:
         raise HTTPException(status_code=500, detail="Error al guardar la imagen")
 
@@ -1556,27 +1563,21 @@ async def http_exception_handler(request, exc):
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc):
     print(Fore.RED + f"Error no manejado: {str(exc)}" + Style.RESET_ALL)
-    return JSONResponse(
-        status_code=500, content={"detail": "Ha ocurrido un error interno"}
-    )
+    return JSONResponse(status_code=500, content={"detail": "Ha ocurrido un error interno"})
 
 # Variable global para controlar el ciclo del servidor
 server_should_exit = False
 
 def signal_handler(signum, frame):
     global server_should_exit
-    print(
-        Fore.YELLOW
-        + "\nDetención solicitada. Cerrando el servidor..."
-        + Style.RESET_ALL
-    )
+    print(Fore.YELLOW + "\nDetención solicitada. Cerrando el servidor..." + Style.RESET_ALL)
     server_should_exit = True
 
 # Configuración del servidor
 config = uvicorn.Config(
     app,
-    host=os.getenv("SERVER_HOST"),
-    port=int(os.getenv("SERVER_PORT"))
+    host=os.getenv("SERVER_HOST", "0.0.0.0"),
+    port=int(os.getenv("SERVER_PORT", 8000))
 )
 server = uvicorn.Server(config)
 
