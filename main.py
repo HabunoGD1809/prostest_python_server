@@ -1382,36 +1382,50 @@ def obtener_cabecilla(
         raise HTTPException(status_code=500, detail="Error interno del servidor")
     
 @app.put("/cabecillas/{cabecilla_id}", response_model=CabecillaSalida)
-def actualizar_cabecilla(
+async def actualizar_cabecilla(
     cabecilla_id: uuid.UUID,
-    cabecilla: CrearCabecilla,
+    nombre: Optional[str] = Form(None),
+    apellido: Optional[str] = Form(None),
+    cedula: Optional[str] = Form(None),
+    telefono: Optional[str] = Form(None),
+    direccion: Optional[str] = Form(None),
+    foto: Optional[UploadFile] = File(None),
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
-):
+): 
     try:
-        # Buscar la cabecilla en la base de datos
         db_cabecilla = (
             db.query(Cabecilla)
             .filter(
                 Cabecilla.id == cabecilla_id, 
-                Cabecilla.creado_por == usuario.id,
                 Cabecilla.soft_delete == False
             )
             .first()
         )
         if not db_cabecilla:
-            logger.warning(f"Cabecilla no encontrada o sin permisos: {cabecilla_id}")
-            raise HTTPException(
-                status_code=404,
-                detail="Cabecilla no encontrada o no tienes permiso para editarlo",
-            )
+            raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
+        
+        if db_cabecilla.creado_por != usuario.id and usuario.rol != 'admin':
+            raise HTTPException(status_code=403, detail="No tienes permiso para editar este cabecilla")
 
-        # Actualizar los atributos de la cabecilla
-        for key, value in cabecilla.dict().items():
-            setattr(db_cabecilla, key, value)
+        if nombre is not None:
+            db_cabecilla.nombre = nombre
+        if apellido is not None:
+            db_cabecilla.apellido = apellido
+        if cedula is not None:
+            db_cabecilla.cedula = cedula
+        if telefono is not None:
+            db_cabecilla.telefono = telefono
+        if direccion is not None:
+            db_cabecilla.direccion = direccion
+
+        if foto:
+            new_foto_url = await actualizar_foto(cabecilla_id, foto, db, "cabecilla", usuario.id)
+            db_cabecilla.foto = new_foto_url
 
         db.commit()
         db.refresh(db_cabecilla)
+
         logger.info(f"Cabecilla actualizado exitosamente: {db_cabecilla.nombre} {db_cabecilla.apellido}")
         return CabecillaSalida.model_validate(db_cabecilla)
     except HTTPException as he:
@@ -1436,7 +1450,6 @@ def eliminar_cabecilla(
         # Eliminar asociaciones con protestas
         db.query(ProtestaCabecilla).filter(ProtestaCabecilla.cabecilla_id == cabecilla_id).delete(synchronize_session=False)
         
-        # Marcamos la cabecilla como eliminada
         db_cabecilla.soft_delete = True
         db.commit()
         logger.info(f"Cabecilla {db_cabecilla.nombre} {db_cabecilla.apellido} eliminado exitosamente por admin: {usuario.nombre} {usuario.apellidos}")
@@ -1469,6 +1482,8 @@ async def actualizar_foto_cabecilla(
     cabecilla = db.query(Cabecilla).get(cabecilla_id)
     cabecilla.foto = new_foto_url
     return CabecillaSalida.model_validate(cabecilla)
+
+# Fin de rutas
 
 # Configurar la ruta base para los archivos estáticos
 STATIC_FILES_DIR = "static"
