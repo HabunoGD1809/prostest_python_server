@@ -8,7 +8,7 @@ import uuid
 import imghdr
 from signal import signal
 from datetime import date, datetime, timedelta, timezone
-from typing import Generic, List, Optional, Tuple, TypeVar
+from typing import Generic, List, Optional, Tuple, TypeVar, Dict
 from contextlib import asynccontextmanager
 
 # Librerías de terceros
@@ -18,8 +18,14 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from jose import jwt, JWTError
-from fastapi import HTTPException, status
-from sqlalchemy import DateTime, create_engine, Column, String, Boolean, Date, ForeignKey
+from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator, validator
+import bcrypt
+import uvicorn
+from colorama import init, Fore, Style
+from dotenv import load_dotenv
+
+# SQLAlchemy
+from sqlalchemy import (DateTime, create_engine, Column, String, Boolean, Date, ForeignKey, func, and_)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
 from sqlalchemy.dialects.postgresql import UUID
@@ -27,14 +33,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import TypeDecorator, CHAR
 from sqlalchemy.schema import CreateSchema
 from sqlalchemy.sql import text
-from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator, validator
-import psycopg2
-import bcrypt
-import uvicorn
-from colorama import init, Fore, Style
-from dotenv import load_dotenv
-from fastapi import HTTPException, status
 
+# PostgreSQL
+import psycopg2
 
 # Cargar variables de entorno
 load_dotenv()
@@ -586,23 +587,116 @@ async def actualizar_token_actividad(request: Request, call_next):
     return response
 
 # Rutas de la API
-@app.get("/pagina-principal", response_model=ResumenPrincipal)
+@app.get("/pagina-principal", response_model=Dict)
 def obtener_resumen_principal(
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    total_protestas = db.query(Protesta).filter(Protesta.soft_delete == False).count()
-    protestas_recientes = (
-        db.query(Protesta)
-        .filter(Protesta.soft_delete == False)
-        .order_by(Protesta.fecha_creacion.desc())
-        .limit(5)
-        .all()
-    )
+    try:
+        # Fecha actual y hace 30 días
+        hoy = datetime.now().date()
+        hace_30_dias = hoy - timedelta(days=30)
 
-    return ResumenPrincipal(
-        total_protestas=total_protestas, protestas_recientes=protestas_recientes
-    )
+        # Total de entidades
+        total_protestas = db.query(Protesta).filter(Protesta.soft_delete == False).count()
+        total_usuarios = db.query(Usuario).filter(Usuario.soft_delete == False).count()
+        total_naturalezas = db.query(Naturaleza).filter(Naturaleza.soft_delete == False).count()
+        total_cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).count()
+
+        # Protestas recientes
+        protestas_recientes = (
+            db.query(Protesta)
+            .filter(Protesta.soft_delete == False)
+            .order_by(Protesta.fecha_creacion.desc())
+            .limit(5)
+            .all()
+        )
+
+        # Protestas por naturaleza
+        protestas_por_naturaleza = dict(
+            db.query(Naturaleza.nombre, func.count(Protesta.id))
+            .join(Protesta)
+            .filter(Protesta.soft_delete == False)
+            .group_by(Naturaleza.nombre)
+            .all()
+        )
+
+        # Protestas por provincia
+        protestas_por_provincia = dict(
+            db.query(Provincia.nombre, func.count(Protesta.id))
+            .join(Protesta)
+            .filter(Protesta.soft_delete == False)
+            .group_by(Provincia.nombre)
+            .all()
+        )
+
+        # Protestas en los últimos 30 días
+        protestas_ultimos_30_dias = {
+            fecha.isoformat(): count
+            for fecha, count in db.query(func.date(Protesta.fecha_evento), func.count(Protesta.id))
+            .filter(and_(Protesta.soft_delete == False, Protesta.fecha_evento >= hace_30_dias))
+            .group_by(func.date(Protesta.fecha_evento))
+            .order_by(func.date(Protesta.fecha_evento))
+            .all()
+        }
+
+        # Top 5 cabecillas más activos
+        top_cabecillas = [
+            {"nombre": f"{nombre} {apellido}", "total_protestas": total}
+            for nombre, apellido, total in db.query(
+                Cabecilla.nombre, Cabecilla.apellido, 
+                func.count(ProtestaCabecilla.protesta_id).label('total_protestas')
+            )
+            .join(ProtestaCabecilla)
+            .join(Protesta)
+            .filter(Protesta.soft_delete == False)
+            .group_by(Cabecilla.id)
+            .order_by(func.count(ProtestaCabecilla.protesta_id).desc())
+            .limit(5)
+            .all()
+        ]
+
+        # Usuarios más activos (creadores de protestas)
+        usuarios_activos = [
+            {"nombre": f"{nombre} {apellidos}", "protestas_creadas": total}
+            for nombre, apellidos, total in db.query(
+                Usuario.nombre, Usuario.apellidos, 
+                func.count(Protesta.id).label('protestas_creadas')
+            )
+            .join(Protesta, Protesta.creado_por == Usuario.id)
+            .filter(Protesta.soft_delete == False)
+            .group_by(Usuario.id)
+            .order_by(func.count(Protesta.id).desc())
+            .limit(5)
+            .all()
+        ]
+
+        return {
+            "totales": {
+                "protestas": total_protestas,
+                "usuarios": total_usuarios,
+                "naturalezas": total_naturalezas,
+                "cabecillas": total_cabecillas
+            },
+            "protestas_recientes": [
+                {
+                    "id": str(protesta.id),
+                    "nombre": protesta.nombre,
+                    "fecha_evento": protesta.fecha_evento.isoformat(),
+                    "fecha_creacion": protesta.fecha_creacion.isoformat(),
+                }
+                for protesta in protestas_recientes
+            ],
+            "protestas_por_naturaleza": protestas_por_naturaleza,
+            "protestas_por_provincia": protestas_por_provincia,
+            "protestas_ultimos_30_dias": protestas_ultimos_30_dias,
+            "top_cabecillas": top_cabecillas,
+            "usuarios_activos": usuarios_activos
+        }
+
+    except Exception as e:
+        logger.error(f"Error al obtener resumen principal: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.put("/usuarios/{usuario_id}/rol", response_model=UsuarioSalida)
 def cambiar_rol_usuario(
