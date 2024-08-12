@@ -586,7 +586,14 @@ async def actualizar_token_actividad(request: Request, call_next):
             pass
     return response
 
-# Rutas de la API
+@app.get("/check-user")
+def check_user_exists(
+    email: str = Query(..., description="Email del usuario a verificar"),
+    db: Session = Depends(obtener_db)
+):
+    usuario = db.query(Usuario).filter(Usuario.email == email, Usuario.soft_delete == False).first()
+    return {"exists": usuario is not None}
+
 @app.get("/pagina-principal", response_model=Dict)
 def obtener_resumen_principal(
     usuario: Usuario = Depends(obtener_usuario_actual),
