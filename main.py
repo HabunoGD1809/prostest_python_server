@@ -482,6 +482,12 @@ def verificar_admin(usuario: Usuario = Depends(obtener_usuario_actual)):
         )
     return usuario
 
+def verificar_propiedad(entidad, usuario: Usuario):
+    if not es_admin(usuario) and entidad.creado_por != usuario.id:
+        raise HTTPException(
+            status_code=403, detail="No tienes permiso para modificar este recurso"
+        )
+
 # Funciones de Paginación
 def paginar(
     query, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100)
@@ -709,7 +715,7 @@ def obtener_resumen_principal(
 def cambiar_rol_usuario(
     usuario_id: uuid.UUID,
     nuevo_rol: str = Query(..., regex="^(admin|usuario)$"),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario_actual: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
     try:
@@ -1300,15 +1306,11 @@ def actualizar_protesta(
     db: Session = Depends(obtener_db),
 ):
     try:
-        # Buscar la protesta existente
         db_protesta = db.query(Protesta).filter(Protesta.id == protesta_id).first()
         if not db_protesta:
             raise HTTPException(status_code=404, detail="Protesta no encontrada")
 
-        if db_protesta.creado_por != usuario.id:
-            raise HTTPException(
-                status_code=403, detail="No tienes permiso para editar esta protesta"
-            )
+        verificar_propiedad(db_protesta, usuario)
 
         # Actualizar campos simples
         db_protesta.nombre = protesta.nombre
@@ -1320,40 +1322,28 @@ def actualizar_protesta(
 
         db_protesta.cabecillas = []
         for cabecilla_id in protesta.cabecillas:
-            db_cabecilla = (
-                db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id).first()
-            )
+            db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id).first()
             if db_cabecilla:
                 db_protesta.cabecillas.append(db_cabecilla)
             else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Cabecilla con ID {cabecilla_id} no encontrado",
-                )
+                raise HTTPException(status_code=400, detail=f"Cabecilla con ID {cabecilla_id} no encontrado")
 
         db.commit()
         db.refresh(db_protesta)
-        print(
-            Fore.GREEN
-            + f"Protesta actualizada exitosamente: {db_protesta.nombre}"
-            + Style.RESET_ALL
-        )
+        print(Fore.GREEN + f"Protesta actualizada exitosamente: {db_protesta.nombre}" + Style.RESET_ALL)
         return ProtestaSalida.model_validate(db_protesta)
 
     except HTTPException as he:
-        # Relanzar las excepciones HTTP sin manejar
         raise he
     except Exception as e:
         db.rollback()
         logger.error(f"Error al actualizar protesta: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail=f"Error interno del servidor: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.delete("/protestas/{protesta_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_protesta(
     protesta_id: uuid.UUID,
-    admin_actual: Usuario = Depends(verificar_admin),
+    admin: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
     try:
@@ -1365,7 +1355,7 @@ def eliminar_protesta(
         db.commit()
 
         logger.info(
-            f"Protesta '{db_protesta.nombre}' eliminada exitosamente por admin: {admin_actual.nombre} {admin_actual.apellidos}"
+            f"Protesta '{db_protesta.nombre}' eliminada exitosamente por admin: {admin.nombre} {admin.apellidos}"
         )
 
         return {"detail": "Protesta eliminada exitosamente"}
@@ -1481,34 +1471,11 @@ def actualizar_naturaleza(
     db: Session = Depends(obtener_db),
 ):
     try:
-        # Verificar si el usuario es admin
-        if not es_admin(usuario):
-            # Verificar si la naturaleza está asociada a una protesta
-            asociada_a_protesta = (
-                db.query(Protesta)
-                .filter(Protesta.naturaleza_id == naturaleza_id)
-                .count()
-                > 0
-            )
-
-            if asociada_a_protesta:
-                logger.warning(
-                    f"El usuario {usuario.id} no tiene permiso para editar la naturaleza {naturaleza_id} porque está asociada a una protesta."
-                )
-                raise HTTPException(
-                    status_code=403,
-                    detail="No tienes permiso para editar esta naturaleza. Está asociada a una protesta.",
-                )
-
-        db_naturaleza = (
-            db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id).first()
-        )
+        db_naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id).first()
         if not db_naturaleza:
-            logger.warning(f"Naturaleza no encontrada: {naturaleza_id}")
-            raise HTTPException(
-                status_code=404,
-                detail="Naturaleza no encontrada",
-            )
+            raise HTTPException(status_code=404, detail="Naturaleza no encontrada")
+
+        verificar_propiedad(db_naturaleza, usuario)
 
         # Actualizar campos
         for key, value in naturaleza.model_dump().items():
@@ -1516,9 +1483,7 @@ def actualizar_naturaleza(
 
         db.commit()
         db.refresh(db_naturaleza)
-        logger.info(
-            f"Naturaleza '{db_naturaleza.nombre}' actualizada exitosamente por usuario: '{usuario.email}'"
-        )
+        logger.info(f"Naturaleza '{db_naturaleza.nombre}' actualizada exitosamente por usuario: '{usuario.email}'")
         return NaturalezaSalida.from_orm(db_naturaleza)
 
     except HTTPException as he:
@@ -1531,7 +1496,7 @@ def actualizar_naturaleza(
 @app.delete("/naturalezas/{naturaleza_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_naturaleza(
     naturaleza_id: uuid.UUID,
-    admin_actual: Usuario = Depends(verificar_admin),
+    admin: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
     try:
@@ -1566,7 +1531,7 @@ def eliminar_naturaleza(
         db.commit()
 
         logger.info(
-            f"Naturaleza {db_naturaleza.nombre} eliminada exitosamente por admin: {admin_actual.nombre} {admin_actual.apellidos}"
+            f"Naturaleza {db_naturaleza.nombre} eliminada exitosamente por admin: {admin.nombre} {admin.apellidos}"
         )
 
         return {"detail": "Naturaleza eliminada exitosamente"}
@@ -1679,18 +1644,11 @@ async def actualizar_cabecilla(
     db: Session = Depends(obtener_db),
 ):
     try:
-        db_cabecilla = (
-            db.query(Cabecilla)
-            .filter(Cabecilla.id == cabecilla_id, Cabecilla.soft_delete == False)
-            .first()
-        )
+        db_cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id, Cabecilla.soft_delete == False).first()
         if not db_cabecilla:
             raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
 
-        if db_cabecilla.creado_por != usuario.id and usuario.rol != "admin":
-            raise HTTPException(
-                status_code=403, detail="No tienes permiso para editar este cabecilla"
-            )
+        verificar_propiedad(db_cabecilla, usuario)
 
         if nombre is not None:
             db_cabecilla.nombre = nombre
@@ -1704,17 +1662,13 @@ async def actualizar_cabecilla(
             db_cabecilla.direccion = direccion
 
         if foto:
-            new_foto_url = await actualizar_foto(
-                cabecilla_id, foto, db, "cabecilla", usuario.id
-            )
+            new_foto_url = await actualizar_foto(cabecilla_id, foto, db, "cabecilla", usuario.id)
             db_cabecilla.foto = new_foto_url
 
         db.commit()
         db.refresh(db_cabecilla)
 
-        logger.info(
-            f"Cabecilla actualizado exitosamente: {db_cabecilla.nombre} {db_cabecilla.apellido}"
-        )
+        logger.info(f"Cabecilla actualizado exitosamente: {db_cabecilla.nombre} {db_cabecilla.apellido}")
         return CabecillaSalida.model_validate(db_cabecilla)
     except HTTPException as he:
         raise he
@@ -1726,7 +1680,7 @@ async def actualizar_cabecilla(
 @app.delete("/cabecillas/{cabecilla_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_cabecilla(
     cabecilla_id: uuid.UUID,
-    usuario: Usuario = Depends(verificar_admin),
+    admin: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
     try:
@@ -1743,7 +1697,7 @@ def eliminar_cabecilla(
         db_cabecilla.soft_delete = True
         db.commit()
         logger.info(
-            f"Cabecilla {db_cabecilla.nombre} {db_cabecilla.apellido} eliminado exitosamente por admin: {usuario.nombre} {usuario.apellidos}"
+            f"Cabecilla {db_cabecilla.nombre} {db_cabecilla.apellido} eliminado exitosamente por admin: {admin.nombre} {admin.apellidos}"
         )
         return {"detail": "Cabecilla eliminado exitosamente"}
     except HTTPException as he:
@@ -1780,12 +1734,19 @@ async def actualizar_foto_cabecilla(
 # Fin de rutas
 
 # Configurar la ruta base para los archivos estáticos
-STATIC_FILES_DIR = "static"
+STATIC_FILES_DIR = os.getenv("STATIC_FILES_DIR")
 UPLOAD_DIR = os.getenv("UPLOAD_DIRECTORY")
-UPLOAD_DIRECTORY = os.path.join(STATIC_FILES_DIR, UPLOAD_DIR)
 MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE"))
 ALLOWED_IMAGE_TYPES = os.getenv("ALLOWED_IMAGE_TYPES").split(",")
 
+if not STATIC_FILES_DIR:
+    raise ValueError("La variable de entorno STATIC_FILES_DIR no está configurada.")
+if not UPLOAD_DIR:
+    raise ValueError("La variable de entorno UPLOAD_DIRECTORY no está configurada.")
+
+UPLOAD_DIRECTORY = os.path.join(STATIC_FILES_DIR, UPLOAD_DIR)
+
+# Montar el directorio estático
 app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
 
 # Asegurarse de que el directorio de uploads exista
@@ -1870,7 +1831,7 @@ async def actualizar_foto(
         return relative_path
     else:
         raise HTTPException(status_code=500, detail="Error al guardar la imagen")
-
+    
 # Manejadores de excepciones
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
