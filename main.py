@@ -2,11 +2,11 @@
 import asyncio
 import logging
 import os
-import shutil
 import sys
 import uuid
-import imghdr
-from signal import signal
+from PIL import Image
+import io
+import signal as signal_module
 from datetime import date, datetime, timedelta, timezone
 from typing import Generic, List, Optional, Tuple, TypeVar, Dict
 from contextlib import asynccontextmanager
@@ -18,7 +18,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from jose import jwt, JWTError
-from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator, validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator
 import bcrypt
 import uvicorn
 from colorama import init, Fore, Style
@@ -26,8 +26,7 @@ from dotenv import load_dotenv
 
 # SQLAlchemy
 from sqlalchemy import (DateTime, create_engine, Column, String, Boolean, Date, ForeignKey, func, and_)
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload
+from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload, declarative_base
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import TypeDecorator, CHAR
@@ -227,12 +226,11 @@ class UsuarioSalida(UsuarioBase):
     fecha_creacion: datetime
     foto: Optional[str] = None
 
-    class Config:
-        from_attributes = True
-
-    @validator("foto", pre=True)
+    @field_validator("foto", mode="before")
     def get_full_foto_url(cls, v):
-        return get_full_image_url(v) if v else None
+        return get_full_image_url(v)
+
+    model_config = ConfigDict(from_attributes=True)
 
 class CrearUsuario(UsuarioBase):
     password: str
@@ -303,17 +301,18 @@ class CabecillaSalida(BaseModel):
     fecha_creacion: date
     soft_delete: bool
 
-    @validator("foto", pre=True)
+    @field_validator("foto", mode="before")
     def get_full_foto_url(cls, v):
-        return get_full_image_url(v) if v else None
+        return get_full_image_url(v)
 
-    class Config:
-        from_attributes = True
-        json_encoders = {
-            uuid.UUID: lambda v: str(v),
-            date: lambda v: v.isoformat(),
-            datetime: lambda v: v.isoformat(),
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_encoders={
+            uuid.UUID: str,
+            date: date.isoformat,
+            datetime: datetime.isoformat,
         }
+    )
 
 class CrearProtesta(BaseModel):
     nombre: str
@@ -714,7 +713,7 @@ def obtener_resumen_principal(
 @app.put("/usuarios/{usuario_id}/rol", response_model=UsuarioSalida)
 def cambiar_rol_usuario(
     usuario_id: uuid.UUID,
-    nuevo_rol: str = Query(..., regex="^(admin|usuario)$"),
+    nuevo_rol: str = Query(..., pattern="^(admin|usuario)$"),
     usuario_actual: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
@@ -1767,17 +1766,20 @@ def validate_image(file: UploadFile):
     # Verificar el tipo de archivo
     contents = file.file.read()
     file.file.seek(0)
-    file_type = imghdr.what(None, h=contents)
+    try:
+        img = Image.open(io.BytesIO(contents))
+        file_type = img.format.lower()
+    except IOError:
+        raise HTTPException(status_code=400, detail="Archivo de imagen inválido.")
+    
     if file_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
             status_code=400,
             detail=f"Tipo de archivo no permitido. Solo se aceptan {', '.join(ALLOWED_IMAGE_TYPES)}.",
         )
 
-def get_full_image_url(foto_path: str) -> str:
-    if foto_path:
-        return f"/static/{foto_path}"
-    return None
+def get_full_image_url(foto_path: Optional[str]) -> Optional[str]:
+    return f"/static/{foto_path}" if foto_path else None
 
 async def save_upload_file(upload_file: UploadFile, destination: str) -> bool:
     try:
@@ -1860,14 +1862,14 @@ def signal_handler(signum, frame):
 # Configuración del servidor
 config = uvicorn.Config(
     app,
-    host=os.getenv("SERVER_HOST", "127.0.0.1"),
-    port=int(os.getenv("SERVER_PORT", 8000)),
+    host=os.getenv("SERVER_HOST"),
+    port=int(os.getenv("SERVER_PORT")),
 )
 server = uvicorn.Server(config)
 
 # Punto de entrada
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
+    signal_module.signal(signal_module.SIGINT, signal_handler)
 
     # Manejo señal de salida
     async def run_server():
