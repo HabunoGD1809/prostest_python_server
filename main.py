@@ -1757,8 +1757,9 @@ async def actualizar_foto_cabecilla(
 # Configurar la ruta base para los archivos estáticos
 STATIC_FILES_DIR = os.getenv("STATIC_FILES_DIR")
 UPLOAD_DIR = os.getenv("UPLOAD_DIRECTORY")
-MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE"))
-ALLOWED_IMAGE_TYPES = os.getenv("ALLOWED_IMAGE_TYPES").split(",")
+MAX_IMAGE_SIZE_MB = int(os.getenv('MAX_IMAGE_SIZE_MB'))
+MAX_IMAGE_DIMENSION = int(os.getenv('MAX_IMAGE_DIMENSION'))
+ALLOWED_IMAGE_TYPES = ('jpeg,jpg,png,gif,webp,bmp').split(',')
 
 if not STATIC_FILES_DIR:
     raise ValueError("La variable de entorno STATIC_FILES_DIR no está configurada.")
@@ -1773,8 +1774,9 @@ app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
 # Asegurarse de que el directorio de uploads exista
 os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
 
-# Funciones auxiliares
 def validate_image(file: UploadFile):
+    MAX_IMAGE_SIZE = MAX_IMAGE_SIZE_MB * 1024 * 1024
+    
     # Verificar el tamaño del archivo
     file.file.seek(0, 2)
     size = file.file.tell()
@@ -1782,9 +1784,9 @@ def validate_image(file: UploadFile):
     if size > MAX_IMAGE_SIZE:
         raise HTTPException(
             status_code=400,
-            detail=f"El archivo es demasiado grande. El tamaño máximo es de {MAX_IMAGE_SIZE // (1024 * 1024)} MB.",
+            detail=f"El archivo es demasiado grande. El tamaño máximo es de {MAX_IMAGE_SIZE_MB} MB.",
         )
-
+    
     # Verificar el tipo de archivo
     contents = file.file.read()
     file.file.seek(0)
@@ -1798,6 +1800,13 @@ def validate_image(file: UploadFile):
         raise HTTPException(
             status_code=400,
             detail=f"Tipo de archivo no permitido. Solo se aceptan {', '.join(ALLOWED_IMAGE_TYPES)}.",
+        )
+    
+    # Verificar las dimensiones de la imagen
+    if img.width > MAX_IMAGE_DIMENSION or img.height > MAX_IMAGE_DIMENSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Las dimensiones de la imagen son demasiado grandes. El tamaño máximo es de {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION} píxeles.",
         )
 
 def get_full_image_url(foto_path: Optional[str]) -> Optional[str]:
