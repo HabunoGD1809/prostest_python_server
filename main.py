@@ -18,7 +18,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from jose import jwt, JWTError
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 import bcrypt
 import uvicorn
 from colorama import init, Fore, Style
@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 
 # SQLAlchemy
 from sqlalchemy import (DateTime, create_engine, Column, String, Boolean, Date, ForeignKey, func, and_)
-from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload, declarative_base
+from sqlalchemy.orm import sessionmaker, relationship, Session, joinedload, declarative_base, contains_eager
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import TypeDecorator, CHAR
@@ -89,7 +89,7 @@ app = FastAPI(lifespan=lifespan)
 # Configuracion CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -195,6 +195,8 @@ class Protesta(Base):
     creado_por = Column(GUID(), ForeignKey("api.usuarios.id"))
     fecha_creacion = Column(Date, default=date.today())
     soft_delete = Column(Boolean, default=False)
+    creado_por = Column(GUID(), ForeignKey("api.usuarios.id"))
+    creador = relationship("Usuario", foreign_keys=[creado_por])
 
     naturaleza = relationship("Naturaleza")
     provincia = relationship("Provincia")
@@ -333,6 +335,8 @@ class ProtestaSalida(BaseModel):
     fecha_creacion: date
     soft_delete: bool
     cabecillas: List[CabecillaSalida]
+    creador_nombre: str
+    creador_email: str
 
     class Config:
         from_attributes = True
@@ -1239,7 +1243,17 @@ def obtener_protestas(
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    query = db.query(Protesta).filter(Protesta.soft_delete == False)
+    query = (
+        db.query(Protesta)
+        .join(Usuario, Protesta.creado_por == Usuario.id)
+        .options(
+            joinedload(Protesta.naturaleza),
+            joinedload(Protesta.provincia),
+            joinedload(Protesta.cabecillas),
+            contains_eager(Protesta.creador)
+        )
+        .filter(Protesta.soft_delete == False)
+    )
 
     if fecha_desde:
         query = query.filter(Protesta.fecha_evento >= fecha_desde)
@@ -1253,11 +1267,19 @@ def obtener_protestas(
     total = query.count()
     pages = (total + page_size - 1) // page_size
 
-    protestas = query.order_by(Protesta.fecha_evento.desc())
-    protestas = protestas.offset((page - 1) * page_size).limit(page_size).all()
+    protestas = query.order_by(Protesta.fecha_evento.desc()).offset((page - 1) * page_size).limit(page_size).all()
+
+    protestas_salida = [
+        ProtestaSalida.model_validate({
+            **protesta.__dict__,
+            'creador_nombre': f"{protesta.creador.nombre} {protesta.creador.apellidos}",
+            'creador_email': protesta.creador.email
+        })
+        for protesta in protestas
+    ]
 
     return {
-        "items": protestas,
+        "items": protestas_salida,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -1270,32 +1292,32 @@ def obtener_protesta(
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
-    # Convertir el string a UUID
     try:
         protesta_uuid = uuid.UUID(protesta_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="ID de protesta inválido")
 
-    try:
-        protesta = (
-            db.query(Protesta)
-            .options(
-                joinedload(Protesta.naturaleza),
-                joinedload(Protesta.provincia),
-                joinedload(Protesta.cabecillas),
-            )
-            .filter(Protesta.id == protesta_uuid, Protesta.soft_delete == False)
-            .first()
+    protesta = (
+        db.query(Protesta)
+        .join(Usuario, Protesta.creado_por == Usuario.id)
+        .options(
+            joinedload(Protesta.naturaleza),
+            joinedload(Protesta.provincia),
+            joinedload(Protesta.cabecillas),
+            contains_eager(Protesta.creador)
         )
+        .filter(Protesta.id == protesta_uuid, Protesta.soft_delete == False)
+        .first()
+    )
 
-        if not protesta:
-            raise HTTPException(status_code=404, detail="Protesta no encontrada")
+    if not protesta:
+        raise HTTPException(status_code=404, detail="Protesta no encontrada")
 
-        return ProtestaSalida.model_validate(protesta)
-
-    except Exception as e:
-        logger.error(f"Error al obtener protesta: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+    return ProtestaSalida.model_validate({
+        **protesta.__dict__,
+        'creador_nombre': f"{protesta.creador.nombre} {protesta.creador.apellidos}",
+        'creador_email': protesta.creador.email
+    })
 
 @app.put("/protestas/{protesta_id}", response_model=ProtestaSalida)
 def actualizar_protesta(
