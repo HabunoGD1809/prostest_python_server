@@ -628,6 +628,18 @@ def obtener_resumen_principal(
             .all()
         )
 
+        protestas_recientes_formatted = []
+        for protesta in protestas_recientes:
+            try:
+                protestas_recientes_formatted.append({
+                    "id": str(protesta.id),
+                    "nombre": protesta.nombre,
+                    "fecha_evento": protesta.fecha_evento.strftime("%Y-%m-%d") if protesta.fecha_evento else None,
+                    "fecha_creacion": protesta.fecha_creacion.strftime("%Y-%m-%d") if protesta.fecha_creacion else None,
+                })
+            except Exception as e:
+                logger.error(f"Error al formatear protesta: {protesta.id}, Error: {str(e)}")
+
         # Protestas por naturaleza
         protestas_por_naturaleza = dict(
             db.query(Naturaleza.nombre, func.count(Protesta.id))
@@ -647,14 +659,13 @@ def obtener_resumen_principal(
         )
 
         # Protestas en los últimos 30 días
-        protestas_ultimos_30_dias = {
-            fecha.isoformat(): count
-            for fecha, count in db.query(func.date(Protesta.fecha_evento), func.count(Protesta.id))
+        protestas_ultimos_30_dias = dict(
+            db.query(func.date(Protesta.fecha_evento), func.count(Protesta.id))
             .filter(and_(Protesta.soft_delete == False, Protesta.fecha_evento >= hace_30_dias))
             .group_by(func.date(Protesta.fecha_evento))
             .order_by(func.date(Protesta.fecha_evento))
             .all()
-        }
+        )
 
         # Top 5 cabecillas más activos
         top_cabecillas = [
@@ -694,25 +705,20 @@ def obtener_resumen_principal(
                 "naturalezas": total_naturalezas,
                 "cabecillas": total_cabecillas
             },
-            "protestas_recientes": [
-                {
-                    "id": str(protesta.id),
-                    "nombre": protesta.nombre,
-                    "fecha_evento": protesta.fecha_evento.isoformat(),
-                    "fecha_creacion": protesta.fecha_creacion.isoformat(),
-                }
-                for protesta in protestas_recientes
-            ],
+            "protestas_recientes": protestas_recientes_formatted,
             "protestas_por_naturaleza": protestas_por_naturaleza,
             "protestas_por_provincia": protestas_por_provincia,
-            "protestas_ultimos_30_dias": protestas_ultimos_30_dias,
+            "protestas_ultimos_30_dias": {
+                fecha.strftime("%Y-%m-%d") if isinstance(fecha, datetime) else str(fecha): str(count)
+                for fecha, count in protestas_ultimos_30_dias.items()
+            },
             "top_cabecillas": top_cabecillas,
             "usuarios_activos": usuarios_activos
         }
 
     except Exception as e:
         logger.error(f"Error al obtener resumen principal: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.put("/usuarios/{usuario_id}/rol", response_model=UsuarioSalida)
 def cambiar_rol_usuario(
