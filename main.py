@@ -89,7 +89,7 @@ app = FastAPI(lifespan=lifespan)
 # Configuracion CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -335,8 +335,8 @@ class ProtestaSalida(BaseModel):
     fecha_creacion: date
     soft_delete: bool
     cabecillas: List[CabecillaSalida]
-    creador_nombre: str
-    creador_email: str
+    creador_nombre: Optional[str] = None
+    creador_email: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -1716,10 +1716,18 @@ def eliminar_cabecilla(
             logger.warning(f"Cabecilla no encontrado: {cabecilla_id}")
             raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
 
-        # Eliminar asociaciones con protestas
-        db.query(ProtestaCabecilla).filter(
+        # Verificar si el cabecilla está asociado a alguna protesta
+        protestas_asociadas = db.query(ProtestaCabecilla).filter(
             ProtestaCabecilla.cabecilla_id == cabecilla_id
-        ).delete(synchronize_session=False)
+        ).first()
+
+        if protestas_asociadas:
+            logger.warning(f"Intento de eliminar cabecilla {cabecilla_id} asociado a protestas")
+            raise HTTPException(
+                status_code=400, 
+                detail="No se puede eliminar el cabecilla porque está asociado a una o más protestas. " 
+                       "Elimine primero las asociaciones con las protestas antes de eliminar el cabecilla."
+            )
 
         db_cabecilla.soft_delete = True
         db.commit()
