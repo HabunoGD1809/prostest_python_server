@@ -1739,17 +1739,18 @@ def eliminar_cabecilla(
             logger.warning(f"Cabecilla no encontrado: {cabecilla_id}")
             raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
 
-        # Verificar si el cabecilla está asociado a alguna protesta
-        protestas_asociadas = db.query(ProtestaCabecilla).filter(
-            ProtestaCabecilla.cabecilla_id == cabecilla_id
+        # Verificar si el cabecilla está asociado a alguna protesta no eliminada
+        protestas_asociadas = db.query(Protesta).join(ProtestaCabecilla).filter(
+            ProtestaCabecilla.cabecilla_id == cabecilla_id,
+            Protesta.soft_delete == False
         ).first()
 
         if protestas_asociadas:
-            logger.warning(f"Intento de eliminar cabecilla {cabecilla_id} asociado a protestas")
+            logger.warning(f"Intento de eliminar cabecilla {cabecilla_id} asociado a protestas activas")
             raise HTTPException(
                 status_code=400, 
-                detail="No se puede eliminar el cabecilla porque está asociado a una o más protestas. " 
-                       "Elimine primero las asociaciones con las protestas antes de eliminar el cabecilla."
+                detail="No se puede eliminar el cabecilla porque está asociado a una o más protestas activas. " 
+                       "Elimine o edite las protestas asociadas antes de eliminar el cabecilla."
             )
 
         db_cabecilla.soft_delete = True
