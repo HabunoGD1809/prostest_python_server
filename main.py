@@ -392,6 +392,9 @@ class PaginatedResponse(BaseModel, Generic[T]):
     class Config:
         from_attributes = True
 
+class VersionResponse(BaseModel):
+    version: str
+
 # Funciones Auxiliares de Base de Datos
 def obtener_db():
     db = SesionLocal()
@@ -580,6 +583,16 @@ async def crear_usuario(
             detail="Error interno del servidor",
         )
 
+# Funcion para la version de la aplicacion 
+def get_current_version():
+    # Intenta obtener la versión desde una variable de entorno
+    version = os.getenv("APP_VERSION")
+    if not version:
+        # Si no está definida, usa un valor por defecto
+        version = "1.0.0"
+        logger.warning("APP_VERSION no está definida en las variables de entorno. Usando versión por defecto.")
+    return version
+
 # Middleware
 @app.middleware("http")
 async def actualizar_token_actividad(request: Request, call_next):
@@ -594,6 +607,16 @@ async def actualizar_token_actividad(request: Request, call_next):
             # Si hay una excepción, no actualizamos el token
             pass
     return response
+
+@app.get("/api/version", response_model=VersionResponse)
+async def get_version():
+    try:
+        current_version = get_current_version()
+        logger.info(f"Versión solicitada: {current_version}")
+        return VersionResponse(version=current_version)
+    except Exception as e:
+        logger.error(f"Error al obtener la versión: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno al obtener la versión")
 
 @app.get("/check-user")
 def check_user_exists(
