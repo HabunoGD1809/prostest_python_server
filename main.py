@@ -1916,41 +1916,29 @@ async def general_exception_handler(request, exc):
         status_code=500, content={"detail": "Ha ocurrido un error interno"}
     )
 
-# Variable global para controlar el ciclo del servidor
-server_should_exit = False
-
-def signal_handler(signum, frame):
-    global server_should_exit
-    print(
-        Fore.YELLOW
-        + "\nDetención solicitada. Cerrando el servidor..."
-        + Style.RESET_ALL
-    )
-    server_should_exit = True
-
 # Configuración del servidor
-config = uvicorn.Config(
-    app,
-    host=os.getenv("SERVER_HOST"),
-    port=int(os.getenv("SERVER_PORT")),
-)
-server = uvicorn.Server(config)
+host = os.getenv("SERVER_HOST")
+port = int(os.getenv("SERVER_PORT"))
 
-# Punto de entrada
-if __name__ == "__main__":
+async def run_server():
+    config = uvicorn.Config(app, host=host, port=port, reload=True)
+    server = uvicorn.Server(config)
+    
+    def signal_handler(signum, frame):
+        print(Fore.YELLOW + "\nDetención solicitada. Cerrando el servidor..." + Style.RESET_ALL)
+        asyncio.create_task(server.shutdown())
+
     signal_module.signal(signal_module.SIGINT, signal_handler)
 
-    # Manejo señal de salida
-    async def run_server():
-        await server.serve()
-        while not server_should_exit:
-            await asyncio.sleep(1)
-        await server.shutdown()
-
     try:
-        print(Fore.CYAN + "Iniciando servidor..." + Style.RESET_ALL)
-        asyncio.run(run_server())
+        print(Fore.CYAN + f"Iniciando servidor en {host}:{port}..." + Style.RESET_ALL)
+        await server.serve()
     except Exception as e:
         print(Fore.RED + f"Error al iniciar el servidor: {str(e)}" + Style.RESET_ALL)
     finally:
         print(Fore.CYAN + "Servidor detenido." + Style.RESET_ALL)
+
+if __name__ == "__main__":
+    asyncio.run(run_server())
+
+# uvicorn main:app --reload --host 127.0.0.1 --port 8000
