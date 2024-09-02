@@ -1804,13 +1804,16 @@ if not STATIC_FILES_DIR:
 if not UPLOAD_DIR:
     raise ValueError("La variable de entorno UPLOAD_DIRECTORY no está configurada.")
 
-UPLOAD_DIRECTORY = os.path.join(STATIC_FILES_DIR, UPLOAD_DIR)
+# Asegurarse de que el directorio de archivos estáticos exista
+os.makedirs(STATIC_FILES_DIR, exist_ok=True)
 
-# Montar el directorio estático
-app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
+UPLOAD_DIRECTORY = os.path.join(STATIC_FILES_DIR, UPLOAD_DIR)
 
 # Asegurarse de que el directorio de uploads exista
 os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
+
+# Montar el directorio estático
+app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
 
 def validate_image(file: UploadFile):
     MAX_IMAGE_SIZE = MAX_IMAGE_SIZE_MB * 1024 * 1024
