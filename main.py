@@ -1940,5 +1940,3 @@ async def run_server():
 
 if __name__ == "__main__":
     asyncio.run(run_server())
-
-# uvicorn main:app --reload --host 127.0.0.1 --port 8000
