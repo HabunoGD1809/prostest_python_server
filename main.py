@@ -630,14 +630,27 @@ def check_user_exists(
 def obtener_resumen_principal(
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
+    fecha_inicio: Optional[date] = Query(None, description="Fecha de inicio para el reporte"),
+    fecha_fin: Optional[date] = Query(None, description="Fecha de fin para el reporte"),
 ):
     try:
-        # Fecha actual y hace 30 días
-        hoy = datetime.now().date()
-        hace_30_dias = hoy - timedelta(days=30)
+        # Si no se proporcionan fechas, usar el rango por defecto (últimos 30 días)
+        if not fecha_inicio:
+            fecha_fin = date.today()
+            fecha_inicio = fecha_fin - timedelta(days=30)
+        elif not fecha_fin:
+            fecha_fin = date.today()
 
-        # Total de entidades
-        total_protestas = db.query(Protesta).filter(Protesta.soft_delete == False).count()
+        # Asegurarse de que fecha_inicio sea anterior a fecha_fin
+        if fecha_inicio > fecha_fin:
+            fecha_inicio, fecha_fin = fecha_fin, fecha_inicio
+
+        # Calcular totales
+        total_protestas = db.query(Protesta).filter(
+            Protesta.soft_delete == False,
+            Protesta.fecha_evento.between(fecha_inicio, fecha_fin)
+        ).count()
+        
         total_usuarios = db.query(Usuario).filter(Usuario.soft_delete == False).count()
         total_naturalezas = db.query(Naturaleza).filter(Naturaleza.soft_delete == False).count()
         total_cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).count()
@@ -645,7 +658,10 @@ def obtener_resumen_principal(
         # Protestas recientes
         protestas_recientes = (
             db.query(Protesta)
-            .filter(Protesta.soft_delete == False)
+            .filter(
+                Protesta.soft_delete == False,
+                Protesta.fecha_evento.between(fecha_inicio, fecha_fin)
+            )
             .order_by(Protesta.fecha_creacion.desc())
             .limit(5)
             .all()
@@ -667,7 +683,10 @@ def obtener_resumen_principal(
         protestas_por_naturaleza = dict(
             db.query(Naturaleza.nombre, func.count(Protesta.id))
             .join(Protesta)
-            .filter(Protesta.soft_delete == False)
+            .filter(
+                Protesta.soft_delete == False,
+                Protesta.fecha_evento.between(fecha_inicio, fecha_fin)
+            )
             .group_by(Naturaleza.nombre)
             .all()
         )
@@ -676,15 +695,21 @@ def obtener_resumen_principal(
         protestas_por_provincia = dict(
             db.query(Provincia.nombre, func.count(Protesta.id))
             .join(Protesta)
-            .filter(Protesta.soft_delete == False)
+            .filter(
+                Protesta.soft_delete == False,
+                Protesta.fecha_evento.between(fecha_inicio, fecha_fin)
+            )
             .group_by(Provincia.nombre)
             .all()
         )
 
-        # Protestas en los últimos 30 días
-        protestas_ultimos_30_dias = dict(
+        # Protestas por día en el rango de fechas seleccionado
+        protestas_por_dia = dict(
             db.query(func.date(Protesta.fecha_evento), func.count(Protesta.id))
-            .filter(and_(Protesta.soft_delete == False, Protesta.fecha_evento >= hace_30_dias))
+            .filter(
+                Protesta.soft_delete == False,
+                Protesta.fecha_evento.between(fecha_inicio, fecha_fin)
+            )
             .group_by(func.date(Protesta.fecha_evento))
             .order_by(func.date(Protesta.fecha_evento))
             .all()
@@ -699,10 +724,13 @@ def obtener_resumen_principal(
             )
             .join(ProtestaCabecilla)
             .join(Protesta)
-            .filter(Protesta.soft_delete == False)
+            .filter(
+                Protesta.soft_delete == False,
+                Protesta.fecha_evento.between(fecha_inicio, fecha_fin)
+            )
             .group_by(Cabecilla.id)
             .order_by(func.count(ProtestaCabecilla.protesta_id).desc())
-            .limit(5)
+            .limit(10)
             .all()
         ]
 
@@ -714,7 +742,10 @@ def obtener_resumen_principal(
                 func.count(Protesta.id).label('protestas_creadas')
             )
             .join(Protesta, Protesta.creado_por == Usuario.id)
-            .filter(Protesta.soft_delete == False)
+            .filter(
+                Protesta.soft_delete == False,
+                Protesta.fecha_evento.between(fecha_inicio, fecha_fin)
+            )
             .group_by(Usuario.id)
             .order_by(func.count(Protesta.id).desc())
             .limit(5)
@@ -731,12 +762,14 @@ def obtener_resumen_principal(
             "protestas_recientes": protestas_recientes_formatted,
             "protestas_por_naturaleza": protestas_por_naturaleza,
             "protestas_por_provincia": protestas_por_provincia,
-            "protestas_ultimos_30_dias": {
+            "protestas_por_dia": {
                 fecha.strftime("%Y-%m-%d") if isinstance(fecha, datetime) else str(fecha): str(count)
-                for fecha, count in protestas_ultimos_30_dias.items()
+                for fecha, count in protestas_por_dia.items()
             },
             "top_cabecillas": top_cabecillas,
-            "usuarios_activos": usuarios_activos
+            "usuarios_activos": usuarios_activos,
+            "fecha_inicio": fecha_inicio.isoformat(),
+            "fecha_fin": fecha_fin.isoformat(),
         }
 
     except Exception as e:
