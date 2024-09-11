@@ -715,7 +715,7 @@ def obtener_resumen_principal(
             .all()
         )
 
-        # Top 5 cabecillas más activos
+        # Top 10 cabecillas más activos
         top_cabecillas = [
             {"nombre": f"{nombre} {apellido}", "total_protestas": total}
             for nombre, apellido, total in db.query(
