@@ -1302,6 +1302,7 @@ def obtener_protestas(
     fecha_hasta: Optional[date] = None,
     provincia_id: Optional[uuid.UUID] = None,
     naturaleza_id: Optional[uuid.UUID] = None,
+    cabecilla_ids: Optional[str] = Query(None, description="Comma-separated list of cabecilla IDs"),
     usuario: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_db),
 ):
@@ -1319,15 +1320,22 @@ def obtener_protestas(
 
     if fecha_desde:
         query = query.filter(Protesta.fecha_evento >= fecha_desde)
+
     if fecha_hasta:
         query = query.filter(Protesta.fecha_evento <= fecha_hasta)
+
     if provincia_id:
         query = query.filter(Protesta.provincia_id == provincia_id)
+
     if naturaleza_id:
         query = query.filter(Protesta.naturaleza_id == naturaleza_id)
 
+    if cabecilla_ids:
+        cabecilla_id_list = [uuid.UUID(id.strip()) for id in cabecilla_ids.split(',')]
+        for cabecilla_id in cabecilla_id_list:
+            query = query.filter(Protesta.cabecillas.any(Cabecilla.id == cabecilla_id))
+
     total = query.count()
-    pages = (total + page_size - 1) // page_size
 
     protestas = query.order_by(Protesta.fecha_evento.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
@@ -1345,7 +1353,7 @@ def obtener_protestas(
         "total": total,
         "page": page,
         "page_size": page_size,
-        "pages": pages,
+        "pages": (total + page_size - 1) // page_size,
     }
 
 @app.get("/protestas/{protesta_id}", response_model=ProtestaSalida)
