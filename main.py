@@ -18,11 +18,12 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from jose import jwt, JWTError
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, FieldValidationInfo
 import bcrypt
 import uvicorn
 from colorama import init, Fore, Style
 from dotenv import load_dotenv
+from passlib.context import CryptContext
 
 # SQLAlchemy
 from sqlalchemy import (DateTime, create_engine, Column, String, Boolean, Date, ForeignKey, func, and_)
@@ -394,6 +395,41 @@ class PaginatedResponse(BaseModel, Generic[T]):
 
 class VersionResponse(BaseModel):
     version: str
+
+# Nuevas for cambio de contraseña
+def validar_contrasena(v: str) -> str:
+    if len(v) < 8:
+        raise ValueError('La contraseña debe tener al menos 8 caracteres')
+    if not any(char.isupper() for char in v):
+        raise ValueError('La contraseña debe contener al menos una letra mayúscula')
+    if not any(char.islower() for char in v):
+        raise ValueError('La contraseña debe contener al menos una letra minúscula')
+    if not any(char.isdigit() for char in v):
+        raise ValueError('La contraseña debe contener al menos un número')
+    return v
+
+class CambioContrasenaUsuario(BaseModel):
+    contrasena_actual: str
+    nueva_contrasena: str
+    confirmar_contrasena: str
+
+    @field_validator('nueva_contrasena')
+    def validar_nueva_contrasena(cls, v):
+        return validar_contrasena(v)
+
+    @field_validator('confirmar_contrasena')
+    def passwords_match(cls, v, info: FieldValidationInfo):
+        if 'nueva_contrasena' in info.data and v != info.data['nueva_contrasena']:
+            raise ValueError('Las contraseñas no coinciden')
+        return v
+
+class RestablecerContrasenaAdmin(BaseModel):
+    nueva_contrasena: str
+
+    @field_validator('nueva_contrasena')
+    def validar_nueva_contrasena(cls, v):
+        return validar_contrasena(v)
+# fin nuevas
 
 # Funciones Auxiliares de Base de Datos
 def obtener_db():
@@ -831,6 +867,70 @@ def cambiar_rol_usuario(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
         )
+
+# nuevas rutas para cambio de contrasena
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+@app.put("/usuarios/{usuario_id}/cambiar-contrasena")
+def cambiar_contrasena_usuario(
+    usuario_id: uuid.UUID,
+    datos: CambioContrasenaUsuario,
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    db: Session = Depends(obtener_db)
+):
+    try:
+        if usuario_actual.id != usuario_id:
+            raise HTTPException(status_code=403, detail="No tienes permiso para cambiar la contraseña de otro usuario")
+        
+        if not pwd_context.verify(datos.contrasena_actual, usuario_actual.password):
+            raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")
+        
+        if pwd_context.verify(datos.nueva_contrasena, usuario_actual.password):
+            raise HTTPException(status_code=400, detail="La nueva contraseña debe ser diferente de la actual")
+        
+        # Validar la nueva contraseña
+        try:
+            validar_contrasena(datos.nueva_contrasena)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        # Verificar que la nueva contraseña y la confirmación coincidan
+        if datos.nueva_contrasena != datos.confirmar_contrasena:
+            raise HTTPException(status_code=400, detail="La nueva contraseña y la confirmación no coinciden")
+        
+        # Actualizar la contraseña
+        hash_nueva_contrasena = pwd_context.hash(datos.nueva_contrasena)
+        usuario_actual.password = hash_nueva_contrasena
+        db.commit()
+        
+        return {"mensaje": "Contraseña actualizada exitosamente"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error interno al cambiar contraseña: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+@app.put("/admin/usuarios/{usuario_id}/restablecer-contrasena")
+def restablecer_contrasena_admin(
+    usuario_id: uuid.UUID,
+    datos: RestablecerContrasenaAdmin,
+    admin: Usuario = Depends(verificar_admin),
+    db: Session = Depends(obtener_db)
+):
+    try:
+        usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
+        if not usuario:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+        hash_nueva_contrasena = obtener_hash_password(datos.nueva_contrasena)
+        usuario.password = hash_nueva_contrasena
+        db.commit()
+        
+        return {"mensaje": f"Contraseña restablecida exitosamente para el usuario {usuario.email}"}
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/usuarios", response_model=List[UsuarioSalida])
 def listar_usuarios(
