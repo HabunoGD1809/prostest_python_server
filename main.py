@@ -938,7 +938,10 @@ def listar_usuarios(
     db: Session = Depends(obtener_db),
 ):
     try:
-        usuarios = db.query(Usuario).filter(Usuario.soft_delete == False).all()
+        usuarios = db.query(Usuario).filter(
+            Usuario.soft_delete == False,
+            Usuario.email != "admin@test.com"  # Filtrar el usuario admin@test.com
+        ).all()
         return usuarios
     except Exception as e:
         print(Fore.RED + f"Error al listar usuarios: {str(e)}" + Style.RESET_ALL)
