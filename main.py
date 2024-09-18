@@ -1992,7 +1992,11 @@ def validate_image(file: UploadFile):
         )
 
 def get_full_image_url(foto_path: Optional[str]) -> Optional[str]:
-    return f"/static/{foto_path}" if foto_path else None
+    if not foto_path:
+        return None
+    if foto_path.startswith(('http://', 'https://')):
+        return foto_path  # Ya es una URL completa
+    return f"/static/{foto_path}"  # Es una ruta local
 
 async def save_upload_file(upload_file: UploadFile, destination: str) -> bool:
     try:
