@@ -68,7 +68,7 @@ except Exception as e:
 URL_BASE_DE_DATOS = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?options=-c search_path=api"
 motor = create_engine(URL_BASE_DE_DATOS)
 
-# el schema 'api' existe y se está utilizando ??
+# Verificar y crear el schema 'api' si no existe
 with motor.connect() as conn:
     if not conn.dialect.has_schema(conn, 'api'):
         conn.execute(CreateSchema('api'))
@@ -79,10 +79,8 @@ Base = declarative_base()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Código de inicio
     print(Fore.GREEN + "Servidor iniciado exitosamente." + Style.RESET_ALL)
     yield
-    # Código de cierre
     print(Fore.YELLOW + "Servidor cerrándose..." + Style.RESET_ALL)
 
 app = FastAPI(lifespan=lifespan)
@@ -210,8 +208,6 @@ class ProtestaCabecilla(Base):
     cabecilla_id = Column(GUID(), ForeignKey("api.cabecillas.id"), primary_key=True)
 
 # Modelos Pydantic
-
-# update down
 class UsuarioBase(BaseModel):
     nombre: str
     apellidos: str
@@ -245,7 +241,6 @@ class CrearUsuario(UsuarioBase):
             raise ValueError("Las contraseñas no coinciden")
         return v
 
-# update up
 class Token(BaseModel):
     token_acceso: str
     token_actualizacion: str
@@ -438,7 +433,6 @@ class RestablecerContrasenaAdmin(BaseModel):
     @field_validator('nueva_contrasena')
     def validar_nueva_contrasena(cls, v):
         return validar_contrasena(v)
-# fin nuevas
 
 # Funciones Auxiliares de Base de Datos
 def obtener_db():
@@ -462,24 +456,15 @@ logger = logging.getLogger(__name__)
 # Creacion y actualizacion de token
 def crear_token_acceso(datos: dict) -> str:
     a_codificar = datos.copy()
-    expira = datetime.now(timezone.utc) + timedelta(
-        minutes=MINUTOS_INACTIVIDAD_PERMITIDOS
-    )  # 15 minutos de expiración
-    a_codificar.update(
-        {
-            "exp": expira.timestamp(),
-            "ultima_actividad": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-    token_jwt_codificado = jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
-    return token_jwt_codificado
+    expira = datetime.now(timezone.utc) + timedelta(minutes=MINUTOS_INACTIVIDAD_PERMITIDOS)
+    a_codificar.update({"exp": expira.timestamp(), "ultima_actividad": datetime.now(timezone.utc).isoformat()})
+    return jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
 
 def crear_token_actualizacion(datos: dict) -> str:
     a_codificar = datos.copy()
-    expira = datetime.now(timezone.utc) + timedelta(days=7)  
+    expira = datetime.now(timezone.utc) + timedelta(days=7)
     a_codificar.update({"exp": expira.timestamp()})
-    token_jwt_codificado = jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
-    return token_jwt_codificado
+    return jwt.encode(a_codificar, CLAVE_SECRETA, algorithm=ALGORITMO)
 
 async def verificar_token_y_actividad(token: str = Depends(oauth2_scheme)) -> str:
     try:
@@ -488,38 +473,25 @@ async def verificar_token_y_actividad(token: str = Depends(oauth2_scheme)) -> st
         ultima_actividad_str = payload.get("ultima_actividad")
 
         if email is None or ultima_actividad_str is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido"
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
         ultima_actividad = datetime.fromisoformat(ultima_actividad_str)
         tiempo_inactivo = datetime.now(timezone.utc) - ultima_actividad
 
         if tiempo_inactivo > timedelta(minutes=MINUTOS_INACTIVIDAD_PERMITIDOS):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Sesión expirada por inactividad",
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión expirada por inactividad")
 
         return email
     except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expirado"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expirado")
     except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
-async def obtener_usuario_actual(
-    token: str = Depends(oauth2_scheme), db: Session = Depends(obtener_db)
-):
+async def obtener_usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(obtener_db)):
     email = await verificar_token_y_actividad(token)
     usuario = db.query(Usuario).filter(Usuario.email == email).first()
     if usuario is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
     return usuario
 
 # Funciones de Control de Acceso
@@ -528,21 +500,15 @@ def es_admin(usuario: Usuario) -> bool:
 
 def verificar_admin(usuario: Usuario = Depends(obtener_usuario_actual)):
     if not es_admin(usuario):
-        raise HTTPException(
-            status_code=403, detail="Se requieren permisos de administrador"
-        )
+        raise HTTPException(status_code=403, detail="Se requieren permisos de administrador")
     return usuario
 
 def verificar_propiedad(entidad, usuario: Usuario):
     if not es_admin(usuario) and entidad.creado_por != usuario.id:
-        raise HTTPException(
-            status_code=403, detail="No tienes permiso para modificar este recurso"
-        )
+        raise HTTPException(status_code=403, detail="No tienes permiso para modificar este recurso")
 
 # Funciones de Paginación
-def paginar(
-    query, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100)
-):
+def paginar(query, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100)):
     total = query.count()
     items = query.offset((page - 1) * page_size).limit(page_size).all()
     return {
@@ -576,12 +542,7 @@ async def crear_usuario_form(
     )
 
 # Función común para crear usuarios
-async def crear_usuario(
-    usuario: CrearUsuario,
-    foto: Optional[UploadFile],
-    db: Session,
-    is_admin_creation: bool = False,
-):
+async def crear_usuario(usuario: CrearUsuario, foto: Optional[UploadFile], db: Session, is_admin_creation: bool = False):
     try:
         hash_password = obtener_hash_password(usuario.password)
         foto_path = None
@@ -603,38 +564,22 @@ async def crear_usuario(
         db.add(db_usuario)
         db.commit()
         db.refresh(db_usuario)
-        print(
-            f"Usuario {'creado por admin' if is_admin_creation else 'registrado'} exitosamente: {usuario.email}"
-        )
+        print(f"Usuario {'creado por admin' if is_admin_creation else 'registrado'} exitosamente: {usuario.email}")
         return db_usuario
     except IntegrityError as e:
         db.rollback()
         if "usuarios_email_key" in str(e.orig):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Ya existe un usuario con el email '{usuario.email}'",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error al crear el usuario. Por favor, intente de nuevo.",
-        )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Ya existe un usuario con el email '{usuario.email}'")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Error al crear el usuario. Por favor, intente de nuevo.")
     except Exception as e:
         db.rollback()
-        print(
-            f"Error al {'crear' if is_admin_creation else 'registrar'} usuario: {str(e)}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor",
-        )
+        print(f"Error al {'crear' if is_admin_creation else 'registrar'} usuario: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 # Funcion para la version de la aplicacion 
 def get_current_version():
-    # Intenta obtener la versión desde una variable de entorno
-    version = os.getenv("APP_VERSION")
+    version = os.getenv("APP_VERSION", "1.0.0")
     if not version:
-        # Si no está definida, usa un valor por defecto
-        version = "1.0.0"
         logger.warning("APP_VERSION no está definida en las variables de entorno. Usando versión por defecto.")
     return version
 
@@ -649,10 +594,10 @@ async def actualizar_token_actividad(request: Request, call_next):
             nuevo_token = crear_token_acceso({"sub": payload["sub"]})
             response.headers["New-Token"] = nuevo_token
         except JWTError:
-            # Si hay una excepción, no actualizamos el token
             pass
     return response
 
+# Rutas
 @app.get("/api/version", response_model=VersionResponse)
 async def get_version():
     try:
@@ -664,10 +609,7 @@ async def get_version():
         raise HTTPException(status_code=500, detail="Error interno al obtener la versión")
 
 @app.get("/check-user")
-def check_user_exists(
-    email: str = Query(..., description="Email del usuario a verificar"),
-    db: Session = Depends(obtener_db)
-):
+def check_user_exists(email: str = Query(..., description="Email del usuario a verificar"), db: Session = Depends(obtener_db)):
     usuario = db.query(Usuario).filter(Usuario.email == email, Usuario.soft_delete == False).first()
     return {"exists": usuario is not None}
 
@@ -679,18 +621,15 @@ def obtener_resumen_principal(
     fecha_fin: Optional[date] = Query(None, description="Fecha de fin para el reporte"),
 ):
     try:
-        # Si no se proporcionan fechas, usar el rango por defecto (últimos 30 días)
         if not fecha_inicio:
             fecha_fin = date.today()
             fecha_inicio = fecha_fin - timedelta(days=30)
         elif not fecha_fin:
             fecha_fin = date.today()
 
-        # Asegurarse de que fecha_inicio sea anterior a fecha_fin
         if fecha_inicio > fecha_fin:
             fecha_inicio, fecha_fin = fecha_fin, fecha_inicio
 
-        # Calcular totales
         total_protestas = db.query(Protesta).filter(
             Protesta.soft_delete == False,
             Protesta.fecha_evento.between(fecha_inicio, fecha_fin)
@@ -700,7 +639,6 @@ def obtener_resumen_principal(
         total_naturalezas = db.query(Naturaleza).filter(Naturaleza.soft_delete == False).count()
         total_cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).count()
 
-        # Protestas recientes
         protestas_recientes = (
             db.query(Protesta)
             .filter(
@@ -724,7 +662,6 @@ def obtener_resumen_principal(
             except Exception as e:
                 logger.error(f"Error al formatear protesta: {protesta.id}, Error: {str(e)}")
 
-        # Protestas por naturaleza
         protestas_por_naturaleza = dict(
             db.query(Naturaleza.nombre, func.count(Protesta.id))
             .join(Protesta)
@@ -736,7 +673,6 @@ def obtener_resumen_principal(
             .all()
         )
 
-        # Protestas por provincia
         protestas_por_provincia = dict(
             db.query(Provincia.nombre, func.count(Protesta.id))
             .join(Protesta)
@@ -748,7 +684,6 @@ def obtener_resumen_principal(
             .all()
         )
 
-        # Protestas por día en el rango de fechas seleccionado
         protestas_por_dia = dict(
             db.query(func.date(Protesta.fecha_evento), func.count(Protesta.id))
             .filter(
@@ -760,7 +695,6 @@ def obtener_resumen_principal(
             .all()
         )
 
-        # Top 10 cabecillas más activos
         top_cabecillas = [
             {"nombre": f"{nombre} {apellido}", "total_protestas": total}
             for nombre, apellido, total in db.query(
@@ -779,7 +713,6 @@ def obtener_resumen_principal(
             .all()
         ]
 
-        # Usuarios más activos (creadores de protestas)
         usuarios_activos = [
             {"nombre": f"{nombre} {apellidos}", "protestas_creadas": total}
             for nombre, apellidos, total in db.query(
@@ -831,53 +764,31 @@ def cambiar_rol_usuario(
     try:
         usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
         if not usuario:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado"
-            )
-
-        if usuario_actual.rol != "admin":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Solo los administradores pueden cambiar roles",
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
         if usuario.rol == "admin" and nuevo_rol == "usuario":
-            admin_count = (
-                db.query(Usuario)
-                .filter(Usuario.rol == "admin", Usuario.soft_delete == False)
-                .count()
-            )
+            admin_count = db.query(Usuario).filter(Usuario.rol == "admin", Usuario.soft_delete == False).count()
             if admin_count == 1:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="No se puede cambiar el rol del último administrador",
-                )
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No se puede cambiar el rol del último administrador")
 
         if usuario.id == usuario_actual.id and nuevo_rol != usuario_actual.rol:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No puedes cambiar tu propio rol",
-            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puedes cambiar tu propio rol")
 
         if usuario.rol != nuevo_rol:
             usuario.rol = nuevo_rol
             db.commit()
             db.refresh(usuario)
-            logger.info(
-                f"{usuario_actual.nombre} {usuario_actual.apellidos} actualizo exitosamente el Rol del usuario: {usuario.email} - Nuevo rol: {nuevo_rol}"
-            )
+            logger.info(f"{usuario_actual.nombre} {usuario_actual.apellidos} actualizó exitosamente el Rol del usuario: {usuario.email} - Nuevo rol: {nuevo_rol}")
 
         return usuario
     except HTTPException as he:
         raise he
     except Exception as e:
         db.rollback()
-        print(f"Error al cambiar rol de usuario: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
-        )
+        logger.error(f"Error al cambiar rol de usuario: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-# nuevas rutas para cambio de contrasena
+# Nuevas rutas para cambio de contraseña
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 @app.put("/usuarios/{usuario_id}/cambiar-contrasena")
@@ -897,17 +808,14 @@ def cambiar_contrasena_usuario(
         if pwd_context.verify(datos.nueva_contrasena, usuario_actual.password):
             raise HTTPException(status_code=400, detail="La nueva contraseña debe ser diferente de la actual")
         
-        # Validar la nueva contraseña
         try:
             validar_contrasena(datos.nueva_contrasena)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         
-        # Verificar que la nueva contraseña y la confirmación coincidan
         if datos.nueva_contrasena != datos.confirmar_contrasena:
             raise HTTPException(status_code=400, detail="La nueva contraseña y la confirmación no coinciden")
         
-        # Actualizar la contraseña
         hash_nueva_contrasena = pwd_context.hash(datos.nueva_contrasena)
         usuario_actual.password = hash_nueva_contrasena
         db.commit()
@@ -953,42 +861,25 @@ def listar_usuarios(
         ).all()
         return usuarios
     except Exception as e:
-        print(Fore.RED + f"Error al listar usuarios: {str(e)}" + Style.RESET_ALL)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor",
-        )
-
-# from fastapi.responses import FileResponse
-
-# @app.get("/debug-static/{file_path:path}")
-# async def debug_static_files(file_path: str):
-#     full_path = os.path.join(STATIC_FILES_DIR, file_path)
-#     if os.path.exists(full_path):
-#         return FileResponse(full_path)
-#     return {"error": "File not found"}
+        logger.error(f"Error al listar usuarios: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.get("/usuarios/me", response_model=UsuarioSalida)
 async def obtener_usuario_actual_ruta(
     usuario: Usuario = Depends(obtener_usuario_actual),
 ):
     usuario_salida = UsuarioSalida.model_validate(usuario)
-    # print(f"Ruta de la foto del usuario: {usuario_salida.foto}")
     return usuario_salida
 
 def verificar_autenticacion(usuario: Usuario = Depends(obtener_usuario_actual)):
     if not usuario:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
     return usuario
 
-# nuevas rutas admin REGISTRO
+# Nuevas rutas admin REGISTRO
 @app.post("/admin/usuarios", response_model=UsuarioSalida)
 async def crear_usuario_admin(
-    usuario_data: Tuple[CrearUsuario, Optional[UploadFile]] = Depends(
-        crear_usuario_form
-    ),
+    usuario_data: Tuple[CrearUsuario, Optional[UploadFile]] = Depends(crear_usuario_form),
     admin: Usuario = Depends(verificar_admin),
     db: Session = Depends(obtener_db),
 ):
@@ -1004,10 +895,7 @@ async def crear_usuario_admin(
         raise he
     except Exception as e:
         logger.error(f"Error al crear usuario admin: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor",
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.delete("/admin/usuarios/{usuario_id}", status_code=status.HTTP_204_NO_CONTENT)
 def eliminar_usuario_admin(
@@ -1017,16 +905,11 @@ def eliminar_usuario_admin(
 ):
     try:
         if usuario_id == admin.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No puedes eliminar tu propio usuario",
-            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puedes eliminar tu propio usuario")
 
         db_usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
         if not db_usuario:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
 
         db_usuario.soft_delete = True
         db.commit()
@@ -1034,17 +917,12 @@ def eliminar_usuario_admin(
         return {"detail": "Usuario eliminado exitosamente"}
     except Exception as e:
         db.rollback()
-        logger.info(f"Error al eliminar usuario: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor",
-        )
+        logger.error(f"Error al eliminar usuario: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.post("/registro", response_model=UsuarioSalida)
 async def registrar_usuario(
-    usuario_data: Tuple[CrearUsuario, Optional[UploadFile]] = Depends(
-        crear_usuario_form
-    ),
+    usuario_data: Tuple[CrearUsuario, Optional[UploadFile]] = Depends(crear_usuario_form),
     db: Session = Depends(obtener_db),
 ):
     usuario, foto = usuario_data
@@ -1055,15 +933,9 @@ async def login_para_token_acceso(
     form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(obtener_db)
 ):
     logger.info(f"Intento de inicio de sesión para: {form_data.username}")
-    usuario = (
-        db.query(Usuario)
-        .filter(Usuario.email == form_data.username, Usuario.soft_delete == False)
-        .first()
-    )
+    usuario = db.query(Usuario).filter(Usuario.email == form_data.username, Usuario.soft_delete == False).first()
     if not usuario or not verificar_password(form_data.password, usuario.password):
-        logger.warning(
-            f"Intento de inicio de sesión fallido para: {form_data.username}"
-        )
+        logger.warning(f"Intento de inicio de sesión fallido para: {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email o contraseña incorrectos",
@@ -1103,25 +975,18 @@ async def renovar_token(
             )
         except jwt.JWTError as e:
             logger.error(f"Error al decodificar el token: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido"
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
         email: str = payload.get("sub")
 
         if email is None:
             logger.warning(f"Payload del token inválido: {payload}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token de actualización inválido",
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token de actualización inválido")
 
         usuario = db.query(Usuario).filter(Usuario.email == email).first()
         if usuario is None:
             logger.warning(f"Usuario no encontrado para el email: {email}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado"
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
 
         nuevo_token_acceso = crear_token_acceso({"sub": email})
         nuevo_token_actualizacion = crear_token_actualizacion({"sub": email})
@@ -1148,16 +1013,12 @@ def crear_naturaleza(
     db: Session = Depends(obtener_db),
 ):
     try:
-        # Crear la nueva instancia de Naturaleza
         db_naturaleza = Naturaleza(**naturaleza.model_dump(), creado_por=usuario.id)
         db.add(db_naturaleza)
         db.commit()
         db.refresh(db_naturaleza)
 
-        # Log exitoso
-        logger.info(
-            f"Naturaleza creada exitosamente: '{naturaleza.nombre}', por USUARIO: {usuario.nombre} {usuario.apellidos}"
-        )
+        logger.info(f"Naturaleza creada exitosamente: '{naturaleza.nombre}', por USUARIO: {usuario.nombre} {usuario.apellidos}")
 
         return NaturalezaSalida.from_orm(db_naturaleza)
 
@@ -1165,26 +1026,15 @@ def crear_naturaleza(
         db.rollback()
         if isinstance(e.orig, psycopg2.errors.UniqueViolation):
             if "naturalezas_nombre_key" in str(e.orig):
-                logger.warning(
-                    f"Intento de crear naturaleza con nombre duplicado: {naturaleza.nombre}"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Ya existe una naturaleza con el nombre '{naturaleza.nombre}'",
-                )
+                logger.warning(f"Intento de crear naturaleza con nombre duplicado: {naturaleza.nombre}")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Ya existe una naturaleza con el nombre '{naturaleza.nombre}'")
         logger.error(f"Error de integridad al crear naturaleza: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error al crear la naturaleza. Por favor, intente de nuevo.",
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Error al crear la naturaleza. Por favor, intente de nuevo.")
 
     except Exception as e:
         db.rollback()
         logger.error(f"Error al crear naturaleza: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor",
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.post("/cabecillas", response_model=CabecillaSalida)
 async def crear_cabecilla(
@@ -1198,7 +1048,6 @@ async def crear_cabecilla(
     db: Session = Depends(obtener_db),
 ):
     try:
-        # Crear el objeto Cabecilla sin la foto primero
         cabecilla_data = {
             "nombre": nombre,
             "apellido": apellido,
@@ -1209,9 +1058,8 @@ async def crear_cabecilla(
         }
         db_cabecilla = Cabecilla(**cabecilla_data)
         db.add(db_cabecilla)
-        db.flush()  # Para obtener el ID generado
+        db.flush()
 
-        # Manejar la subida de la foto si se proporciona
         if foto:
             file_extension = os.path.splitext(foto.filename)[1]
             file_name = f"cabecilla_{db_cabecilla.id}{file_extension}"
@@ -1222,45 +1070,28 @@ async def crear_cabecilla(
                 db_cabecilla.foto = relative_path
             else:
                 db.rollback()
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Error al guardar la imagen",
-                )
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al guardar la imagen")
 
         db.commit()
         db.refresh(db_cabecilla)
 
-        logger.info(
-            f"Cabecilla '{db_cabecilla.nombre} {db_cabecilla.apellido}' creado exitosamente por usuario: '{usuario.email}'"
-        )
+        logger.info(f"Cabecilla '{db_cabecilla.nombre} {db_cabecilla.apellido}' creado exitosamente por usuario: '{usuario.email}'")
 
-        # Devolver la respuesta en el formato correcto
         return CabecillaSalida.model_validate(db_cabecilla)
 
     except IntegrityError as e:
         db.rollback()
         if isinstance(e.orig, psycopg2.errors.UniqueViolation):
             if "cabecillas_cedula_key" in str(e.orig):
-                logger.warning(
-                    f"Intento de crear cabecilla con cédula duplicada: {cedula}"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Ya existe un cabecilla con la cédula '{cedula}'",
-                )
+                logger.warning(f"Intento de crear cabecilla con cédula duplicada: {cedula}")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Ya existe un cabecilla con la cédula '{cedula}'")
         logger.error(f"Error de integridad al crear cabecilla: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error al crear el cabecilla. Por favor, intente de nuevo.",
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Error al crear el cabecilla. Por favor, intente de nuevo.")
 
     except Exception as e:
         db.rollback()
         logger.error(f"Error al crear cabecilla: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor",
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.post("/protestas/completa", response_model=ProtestaSalida)
 def crear_protesta_completa(
@@ -1269,28 +1100,21 @@ def crear_protesta_completa(
     db: Session = Depends(obtener_db),
 ):
     try:
-        # Crear nueva naturaleza si se proporciona
         if protesta.nueva_naturaleza:
-            nueva_naturaleza = Naturaleza(
-                **protesta.nueva_naturaleza.model_dump(), creado_por=usuario.id
-            )
+            nueva_naturaleza = Naturaleza(**protesta.nueva_naturaleza.model_dump(), creado_por=usuario.id)
             db.add(nueva_naturaleza)
             db.flush()
             naturaleza_id = nueva_naturaleza.id
         else:
             naturaleza_id = protesta.naturaleza_id
 
-        # Crear nuevos cabecillas
         nuevos_cabecillas_ids = []
         for nuevo_cabecilla in protesta.nuevos_cabecillas:
-            db_cabecilla = Cabecilla(
-                **nuevo_cabecilla.model_dump(), creado_por=usuario.id
-            )
+            db_cabecilla = Cabecilla(**nuevo_cabecilla.model_dump(), creado_por=usuario.id)
             db.add(db_cabecilla)
             db.flush()
             nuevos_cabecillas_ids.append(db_cabecilla.id)
 
-        # Crear la protesta
         db_protesta = Protesta(
             nombre=protesta.nombre,
             naturaleza_id=naturaleza_id,
@@ -1302,16 +1126,12 @@ def crear_protesta_completa(
         db.add(db_protesta)
         db.flush()
 
-        # Asociar cabecillas existentes y nuevos
         for cabecilla_id in protesta.cabecillas + nuevos_cabecillas_ids:
             cabecilla = db.query(Cabecilla).get(cabecilla_id)
             if cabecilla:
                 db_protesta.cabecillas.append(cabecilla)
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Cabecilla con ID {cabecilla_id} no encontrado",
-                )
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Cabecilla con ID {cabecilla_id} no encontrado")
 
         db.commit()
         db.refresh(db_protesta)
@@ -1321,18 +1141,12 @@ def crear_protesta_completa(
     except IntegrityError as e:
         db.rollback()
         logger.error(f"Error de integridad al crear la protesta: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error al crear la protesta. Por favor, intente de nuevo.",
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Error al crear la protesta. Por favor, intente de nuevo.")
 
     except Exception as e:
         db.rollback()
         logger.error(f"Error al crear protesta: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor",
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno del servidor")
 
 @app.post("/protestas", response_model=ProtestaSalida)
 def crear_protesta(
@@ -1341,25 +1155,16 @@ def crear_protesta(
     db: Session = Depends(obtener_db),
 ):
     try:
-        # Validar que la naturaleza y la provincia existen
         naturaleza = db.query(Naturaleza).get(protesta.naturaleza_id)
         provincia = db.query(Provincia).get(protesta.provincia_id)
         if not naturaleza or not provincia:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Naturaleza o provincia no válida",
-            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Naturaleza o provincia no válida")
 
-        # Validar que los cabecillas existen
         cabecillas_ids = protesta.cabecillas
         cabecillas = db.query(Cabecilla).filter(Cabecilla.id.in_(cabecillas_ids)).all()
         if len(cabecillas) != len(cabecillas_ids):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uno o más cabecillas no son válidos",
-            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uno o más cabecillas no son válidos")
 
-        # Crear la protesta
         db_protesta = Protesta(
             nombre=protesta.nombre,
             naturaleza_id=protesta.naturaleza_id,
@@ -1369,9 +1174,8 @@ def crear_protesta(
             creado_por=usuario.id,
         )
         db.add(db_protesta)
-        db.flush()  # Para obtener el ID de la protesta
+        db.flush()
 
-        # Asociar cabecillas a la protesta
         for cabecilla_id in cabecillas_ids:
             cabecilla = db.query(Cabecilla).get(cabecilla_id)
             if cabecilla:
@@ -1387,17 +1191,11 @@ def crear_protesta(
     except IntegrityError as e:
         db.rollback()
         logger.error(f"Error de integridad al crear la protesta: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Error de integridad en la base de datos. Por favor, intente de nuevo.",
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Error de integridad en la base de datos. Por favor, intente de nuevo.")
     except Exception as e:
         db.rollback()
         logger.error(f"Error al crear protesta: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error interno del servidor: {str(e)}",
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/protestas", response_model=PaginatedResponse[ProtestaSalida])
 def obtener_protestas(
@@ -1508,7 +1306,6 @@ def actualizar_protesta(
 
         verificar_propiedad(db_protesta, usuario)
 
-        # Actualizar campos simples
         db_protesta.nombre = protesta.nombre
         db_protesta.resumen = protesta.resumen
         db_protesta.fecha_evento = protesta.fecha_evento
@@ -1526,7 +1323,7 @@ def actualizar_protesta(
 
         db.commit()
         db.refresh(db_protesta)
-        print(Fore.GREEN + f"Protesta actualizada exitosamente: {db_protesta.nombre}" + Style.RESET_ALL)
+        logger.info(f"Protesta actualizada exitosamente: {db_protesta.nombre}")
         return ProtestaSalida.model_validate(db_protesta)
 
     except HTTPException as he:
@@ -1550,17 +1347,13 @@ def eliminar_protesta(
         db_protesta.soft_delete = True
         db.commit()
 
-        logger.info(
-            f"Protesta '{db_protesta.nombre}' eliminada exitosamente por admin: {admin.nombre} {admin.apellidos}"
-        )
+        logger.info(f"Protesta '{db_protesta.nombre}' eliminada exitosamente por admin: {admin.nombre} {admin.apellidos}")
 
         return {"detail": "Protesta eliminada exitosamente"}
 
     except HTTPException as he:
-        # Relanzar excepciones HTTP
         raise he
     except Exception as e:
-        # Manejar otros errores
         db.rollback()
         logger.error(f"Error al eliminar protesta: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
@@ -1572,14 +1365,10 @@ def obtener_provincias(
 ):
     try:
         provincias = db.query(Provincia).filter(Provincia.soft_delete == False).all()
-        print(
-            Fore.GREEN
-            + f"Provincias obtenidas exitosamente. Total: {len(provincias)}"
-            + Style.RESET_ALL
-        )
+        logger.info(f"Provincias obtenidas exitosamente. Total: {len(provincias)}")
         return provincias
     except Exception as e:
-        print(Fore.RED + f"Error al obtener provincias: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al obtener provincias: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.get("/provincias/{provincia_id}", response_model=ProvinciaSalida)
@@ -1589,11 +1378,7 @@ def obtener_provincia(
     db: Session = Depends(obtener_db),
 ):
     try:
-        provincia = (
-            db.query(Provincia)
-            .filter(Provincia.id == provincia_id, Provincia.soft_delete == False)
-            .first()
-        )
+        provincia = db.query(Provincia).filter(Provincia.id == provincia_id, Provincia.soft_delete == False).first()
         if not provincia:
             raise HTTPException(status_code=404, detail="Provincia no encontrada")
         return provincia
@@ -1626,9 +1411,7 @@ def obtener_naturalezas(
             "pages": (total + page_size - 1) // page_size,
         }
 
-        logger.info(
-            f"Naturalezas obtenidas exitosamente. Total: {total}, Página: {page}"
-        )
+        logger.info(f"Naturalezas obtenidas exitosamente. Total: {total}, Página: {page}")
         return result
     except Exception as e:
         logger.error(f"Error al obtener naturalezas: {str(e)}")
@@ -1641,11 +1424,7 @@ def obtener_naturaleza(
     db: Session = Depends(obtener_db),
 ):
     try:
-        naturaleza = (
-            db.query(Naturaleza)
-            .filter(Naturaleza.id == naturaleza_id, Naturaleza.soft_delete == False)
-            .first()
-        )
+        naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id, Naturaleza.soft_delete == False).first()
         if not naturaleza:
             logger.warning(f"Naturaleza no encontrada: {naturaleza_id}")
             raise HTTPException(status_code=404, detail="Naturaleza no encontrada")
@@ -1653,7 +1432,6 @@ def obtener_naturaleza(
         logger.info(f"Naturaleza obtenida exitosamente: {naturaleza.nombre}")
         return NaturalezaSalida.from_orm(naturaleza)
     except HTTPException as he:
-        # Relanzar excepciones HTTP
         raise he
     except Exception as e:
         logger.error(f"Error al obtener naturaleza: {str(e)}")
@@ -1673,7 +1451,6 @@ def actualizar_naturaleza(
 
         verificar_propiedad(db_naturaleza, usuario)
 
-        # Actualizar campos
         for key, value in naturaleza.model_dump().items():
             setattr(db_naturaleza, key, value)
 
@@ -1696,24 +1473,15 @@ def eliminar_naturaleza(
     db: Session = Depends(obtener_db),
 ):
     try:
-        # Verificar si la naturaleza existe
-        db_naturaleza = (
-            db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id).first()
-        )
+        db_naturaleza = db.query(Naturaleza).filter(Naturaleza.id == naturaleza_id).first()
         if not db_naturaleza:
             logger.warning(f"Naturaleza no encontrada: {naturaleza_id}")
             raise HTTPException(status_code=404, detail="Naturaleza no encontrada")
 
-        # Verificar si la naturaleza está asociada a alguna protesta no eliminada
-        protestas_asociadas = (
-            db.query(Protesta)
-            .filter(
-                Protesta.naturaleza_id == naturaleza_id,
-                Protesta.soft_delete
-                == False,  
-            )
-            .first()
-        )
+        protestas_asociadas = db.query(Protesta).filter(
+            Protesta.naturaleza_id == naturaleza_id,
+            Protesta.soft_delete == False,
+        ).first()
 
         if protestas_asociadas:
             logger.warning(f"Naturaleza {naturaleza_id} asociada a protestas activas.")
@@ -1722,18 +1490,14 @@ def eliminar_naturaleza(
                 detail="No se puede eliminar una naturaleza asociada a protestas. Elimine o edite las protestas primero.",
             )
 
-        # Realizar soft delete
         db_naturaleza.soft_delete = True
         db.commit()
 
-        logger.info(
-            f"Naturaleza {db_naturaleza.nombre} eliminada exitosamente por admin: {admin.nombre} {admin.apellidos}"
-        )
+        logger.info(f"Naturaleza {db_naturaleza.nombre} eliminada exitosamente por admin: {admin.nombre} {admin.apellidos}")
 
         return {"detail": "Naturaleza eliminada exitosamente"}
 
     except HTTPException as he:
-        # Relanzar excepciones HTTP
         raise he
     except Exception as e:
         db.rollback()
@@ -1751,7 +1515,6 @@ def obtener_cabecillas(
     db: Session = Depends(obtener_db),
 ):
     try:
-        # Construir la consulta con filtros
         query = db.query(Cabecilla).filter(Cabecilla.soft_delete == False)
 
         if nombre:
@@ -1761,14 +1524,9 @@ def obtener_cabecillas(
         if cedula:
             query = query.filter(Cabecilla.cedula.ilike(f"%{cedula}%"))
 
-        # Contar el total de registros
         total = query.count()
-
-        # Obtener los resultados paginados
         cabecillas = query.offset((page - 1) * page_size).limit(page_size).all()
-        cabecillas_salida = [
-            CabecillaSalida.model_validate(c.__dict__) for c in cabecillas
-        ]
+        cabecillas_salida = [CabecillaSalida.model_validate(c.__dict__) for c in cabecillas]
 
         result = {
             "items": cabecillas_salida,
@@ -1778,15 +1536,12 @@ def obtener_cabecillas(
             "pages": (total + page_size - 1) // page_size,
         }
 
-        logger.info(
-            f"Cabecillas obtenidos exitosamente. Total: {total}, Página: {page}"
-        )
+        logger.info(f"Cabecillas obtenidos exitosamente. Total: {total}, Página: {page}")
         return result
     except Exception as e:
         logger.error(f"Error al obtener cabecillas: {str(e)}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-# NUEVO ENDPOINT
 @app.get("/cabecillas/all", response_model=List[CabecillaSalida])
 def obtener_todos_los_cabecillas(
     usuario: Usuario = Depends(obtener_usuario_actual),
@@ -1794,9 +1549,7 @@ def obtener_todos_los_cabecillas(
 ):
     try:
         cabecillas = db.query(Cabecilla).filter(Cabecilla.soft_delete == False).all()
-        cabecillas_salida = [
-            CabecillaSalida.model_validate(c.__dict__) for c in cabecillas
-        ]
+        cabecillas_salida = [CabecillaSalida.model_validate(c.__dict__) for c in cabecillas]
         return cabecillas_salida
     except Exception as e:
         logger.error(f"Error al obtener todos los cabecillas: {str(e)}")
@@ -1809,17 +1562,11 @@ def obtener_cabecilla(
     db: Session = Depends(obtener_db),
 ):
     try:
-        cabecilla = (
-            db.query(Cabecilla)
-            .filter(Cabecilla.id == cabecilla_id, Cabecilla.soft_delete == False)
-            .first()
-        )
+        cabecilla = db.query(Cabecilla).filter(Cabecilla.id == cabecilla_id, Cabecilla.soft_delete == False).first()
         if not cabecilla:
             logger.warning(f"Cabecilla no encontrado: {cabecilla_id}")
             raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
-        logger.info(
-            f"Cabecilla obtenido exitosamente: {cabecilla.nombre} {cabecilla.apellido}"
-        )
+        logger.info(f"Cabecilla obtenido exitosamente: {cabecilla.nombre} {cabecilla.apellido}")
         return CabecillaSalida.model_validate(cabecilla)
     except HTTPException as he:
         raise he
@@ -1967,11 +1714,10 @@ def eliminar_cabecilla(
             logger.warning(f"Cabecilla no encontrado: {cabecilla_id}")
             raise HTTPException(status_code=404, detail="Cabecilla no encontrado")
 
-        # Verificar si el cabecilla está asociado a alguna protesta no eliminada
         protestas_asociadas = db.query(Protesta).join(ProtestaCabecilla).filter(
             ProtestaCabecilla.cabecilla_id == cabecilla_id,
             Protesta.soft_delete == False
-        ).first()
+            ).first()
 
         if protestas_asociadas:
             logger.warning(f"Intento de eliminar cabecilla {cabecilla_id} asociado a protestas activas")
@@ -2018,9 +1764,7 @@ async def actualizar_foto_cabecilla(
     cabecilla.foto = new_foto_url
     return CabecillaSalida.model_validate(cabecilla)
 
-# Fin de rutas
-
-# Configurar la ruta base para los archivos estáticos
+# Configuración de archivos estáticos
 STATIC_FILES_DIR = os.getenv("STATIC_FILES_DIR")
 UPLOAD_DIR = os.getenv("UPLOAD_DIRECTORY")
 MAX_IMAGE_SIZE_MB = int(os.getenv('MAX_IMAGE_SIZE_MB'))
@@ -2032,21 +1776,16 @@ if not STATIC_FILES_DIR:
 if not UPLOAD_DIR:
     raise ValueError("La variable de entorno UPLOAD_DIRECTORY no está configurada.")
 
-# Asegurarse de que el directorio de archivos estáticos exista
 os.makedirs(STATIC_FILES_DIR, exist_ok=True)
 
 UPLOAD_DIRECTORY = os.path.join(STATIC_FILES_DIR, UPLOAD_DIR)
-
-# Asegurarse de que el directorio de uploads exista
 os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
 
-# Montar el directorio estático
 app.mount("/static", StaticFiles(directory=STATIC_FILES_DIR), name="static")
 
 def validate_image(file: UploadFile):
     MAX_IMAGE_SIZE = MAX_IMAGE_SIZE_MB * 1024 * 1024
     
-    # Verificar el tamaño del archivo
     file.file.seek(0, 2)
     size = file.file.tell()
     file.file.seek(0)
@@ -2056,7 +1795,6 @@ def validate_image(file: UploadFile):
             detail=f"El archivo es demasiado grande. El tamaño máximo es de {MAX_IMAGE_SIZE_MB} MB.",
         )
     
-    # Verificar el tipo de archivo
     contents = file.file.read()
     file.file.seek(0)
     try:
@@ -2071,7 +1809,6 @@ def validate_image(file: UploadFile):
             detail=f"Tipo de archivo no permitido. Solo se aceptan {', '.join(ALLOWED_IMAGE_TYPES)}.",
         )
     
-    # Verificar las dimensiones de la imagen
     if img.width > MAX_IMAGE_DIMENSION or img.height > MAX_IMAGE_DIMENSION:
         raise HTTPException(
             status_code=400,
@@ -2082,8 +1819,8 @@ def get_full_image_url(foto_path: Optional[str]) -> Optional[str]:
     if not foto_path:
         return None
     if foto_path.startswith(('http://', 'https://')):
-        return foto_path  # Ya es una URL completa
-    return f"/static/{foto_path}"  # Es una ruta local
+        return foto_path
+    return f"/static/{foto_path}"
 
 async def save_upload_file(upload_file: UploadFile, destination: str) -> bool:
     try:
@@ -2092,7 +1829,7 @@ async def save_upload_file(upload_file: UploadFile, destination: str) -> bool:
             buffer.write(contents)
         return True
     except Exception as e:
-        print(f"Error al guardar el archivo: {str(e)}")
+        logger.error(f"Error al guardar el archivo: {str(e)}")
         return False
 
 def delete_old_file(file_path: str):
@@ -2120,11 +1857,8 @@ async def actualizar_foto(
         raise ValueError("Tipo de entidad no válido")
 
     if not entity:
-        raise HTTPException(
-            status_code=404, detail=f"{entity_type.capitalize()} no encontrado"
-        )
+        raise HTTPException(status_code=404, detail=f"{entity_type.capitalize()} no encontrado")
 
-    # Eliminar la foto anterior si existe
     if entity.foto:
         old_file_path = os.path.join(STATIC_FILES_DIR, entity.foto)
         if os.path.isfile(old_file_path):
@@ -2137,19 +1871,17 @@ async def actualizar_foto(
         return relative_path
     else:
         raise HTTPException(status_code=500, detail="Error al guardar la imagen")
-    
+
 # Manejadores de excepciones
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
-    print(Fore.YELLOW + f"HTTPException: {exc.detail}" + Style.RESET_ALL)
+    logger.warning(f"HTTPException: {exc.detail}")
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc):
-    print(Fore.RED + f"Error no manejado: {str(exc)}" + Style.RESET_ALL)
-    return JSONResponse(
-        status_code=500, content={"detail": "Ha ocurrido un error interno"}
-    )
+    logger.error(f"Error no manejado: {str(exc)}")
+    return JSONResponse(status_code=500, content={"detail": "Ha ocurrido un error interno"})
 
 # Configuración del servidor
 host = os.getenv("SERVER_HOST")
@@ -2160,18 +1892,18 @@ async def run_server():
     server = uvicorn.Server(config)
     
     def signal_handler(signum, frame):
-        print(Fore.YELLOW + "\nDetención solicitada. Cerrando el servidor..." + Style.RESET_ALL)
+        logger.warning("\nDetención solicitada. Cerrando el servidor...")
         asyncio.create_task(server.shutdown())
 
     signal_module.signal(signal_module.SIGINT, signal_handler)
 
     try:
-        print(Fore.CYAN + f"Iniciando servidor en {host}:{port}..." + Style.RESET_ALL)
+        logger.info(f"Iniciando servidor en {host}:{port}...")
         await server.serve()
     except Exception as e:
-        print(Fore.RED + f"Error al iniciar el servidor: {str(e)}" + Style.RESET_ALL)
+        logger.error(f"Error al iniciar el servidor: {str(e)}")
     finally:
-        print(Fore.CYAN + "Servidor detenido." + Style.RESET_ALL)
+        logger.info("Servidor detenido.")
 
 if __name__ == "__main__":
     asyncio.run(run_server())
